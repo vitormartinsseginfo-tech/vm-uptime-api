@@ -1,226 +1,166 @@
-// server.js
-// VM Uptime API - Express + Postgres
-// Features:
-// - Login with PANEL_PASSWORD -> HttpOnly cookie
-// - CRUD for monitored sites (GET/POST/DELETE /api/sites)
-// - Force check endpoint POST /api/check-now (protected)
-// - Periodic checkAll() every 5 minutes
-// - Uses a Cloudflare Worker (SPY_URL) for domains under vm-security.com to bypass Cloudflare IP blocks
-// Env vars required:
-// - DATABASE_URL (postgres connection string)
-// - PANEL_PASSWORD (recommended)
-// - SPY_URL (URL of your Cloudflare Worker, e.g. https://monitor24x7.vm-security.workers.dev) - optional fallback is undefined
-// - FRONTEND_URL (optional) - if set, used by CORS origin; otherwise origin reflected
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>VM Security | Uptime Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg: #0b0e14; --card: #151921; --primary: #FF7A18; --text: #f8fafc; --online: #22c55e; --offline: #ef4444; --warning: #eab308; }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; }
+        .container { width: 100%; max-width: 900px; }
+        
+        #login-screen { text-align: center; margin-top: 100px; }
+        .login-box { background: var(--card); padding: 40px; border-radius: 20px; border: 1px solid #2d3748; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        
+        #main-panel { display: none; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+        .header h1 { font-weight: 800; font-size: 1.8rem; margin: 0; }
+        
+        .controls { display: flex; gap: 12px; margin-bottom: 30px; background: var(--card); padding: 20px; border-radius: 16px; border: 1px solid #2d3748; }
+        input { flex: 1; padding: 14px; border-radius: 10px; border: 1px solid #2d3748; background: #000; color: #fff; font-size: 1rem; }
+        
+        button { padding: 14px 24px; border: none; border-radius: 10px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        .btn-add { background: var(--primary); color: #000; }
+        .btn-refresh { background: #2d3748; color: #fff; }
+        .btn-refresh:hover { background: #4a5568; }
+        
+        .site-card { background: var(--card); padding: 20px; border-radius: 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #2d3748; transition: 0.3s; }
+        .site-card:hover { transform: translateX(5px); border-color: #4a5568; }
+        .site-card.online { border-left: 6px solid var(--online); }
+        .site-card.offline { border-left: 6px solid var(--offline); }
+        
+        .site-info h3 { margin: 0; font-size: 1.1rem; display: flex; align-items: center; gap: 8px; }
+        .metrics { display: flex; gap: 20px; margin-top: 10px; font-size: 0.8rem; color: #94a3b8; }
+        .metric-item { display: flex; align-items: center; gap: 5px; }
+        
+        .status-badge { padding: 6px 14px; border-radius: 30px; font-size: 0.75rem; font-weight: 800; letter-spacing: 0.5px; }
+        .status-online { background: rgba(34, 197, 94, 0.15); color: var(--online); }
+        .status-offline { background: rgba(239, 68, 68, 0.15); color: var(--offline); }
+        
+        .btn-del { background: transparent; color: #4a5568; font-size: 1.2rem; border: none; cursor: pointer; padding: 5px; }
+        .btn-del:hover { color: var(--offline); }
 
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors');
-const { Pool } = require('pg');
-const cookieParser = require('cookie-parser');
+        .loading-bar { height: 3px; background: var(--primary); width: 0%; position: fixed; top: 0; left: 0; transition: 0.4s; z-index: 100; }
+    </style>
+</head>
+<body>
+    <div id="loading" class="loading-bar"></div>
 
-const app = express();
-app.use(express.json());
-app.use(cookieParser());
+    <div id="login-screen" class="container">
+        <div class="login-box">
+            <img src="https://cdn.abacus.ai/images/dc529c8e-179f-41fe-b4d9-b97bb317831e.png" width="60">
+            <h2 style="margin: 20px 0;">VM Security Monitor</h2>
+            <input type="password" id="passInput" placeholder="Sua senha mestra">
+            <button class="btn-add" onclick="login()" style="width: 100%; margin-top: 20px;">ENTRAR NO DASHBOARD</button>
+        </div>
+    </div>
 
-// CONFIG
-const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL;
-const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
-const SPY_URL = process.env.SPY_URL || 'https://monitor24x7.vm-security.workers.dev'; // set your worker URL in env
-const FRONTEND_URL = process.env.FRONTEND_URL || true; // set to your Cloudflare Pages URL to lock origin, or true to reflect
+    <div id="main-panel" class="container">
+        <div class="header">
+            <div>
+                <h1>Uptime Monitor</h1>
+                <p id="update-timer" style="color: #64748b; margin: 5px 0 0 0; font-size: 0.85rem;"></p>
+            </div>
+            <button onclick="location.reload()" style="background:none; color:#64748b; font-weight: normal;">Sair</button>
+        </div>
 
-if (!DATABASE_URL) {
-  console.error('ERRO: a variável de ambiente DATABASE_URL não está definida.');
-  process.exit(1);
-}
+        <div class="controls">
+            <input type="text" id="newSite" placeholder="https://www.cliente.com.br">
+            <button class="btn-add" onclick="addSite()">MONITORAR</button>
+            <button class="btn-refresh" id="refreshBtn" onclick="forceUpdate()">🔄 ATUALIZAR</button>
+        </div>
 
-// Postgres pool (Render & many hosts require SSL false rejectAuthorized)
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+        <div id="siteList"></div>
+    </div>
 
-// CORS - allow credentials, reflect origin or restrict to FRONTEND_URL
-app.use(cors({
-  origin: FRONTEND_URL,
-  credentials: true
-}));
+    <script>
+        const API_URL = 'https://vm-uptime-api.onrender.com';
+        let timer = 30;
 
-// Initialize DB table (adds response_ms column)
-pool.query(`
-  CREATE TABLE IF NOT EXISTS monitor_sites (
-    id SERIAL PRIMARY KEY,
-    url TEXT NOT NULL,
-    status TEXT DEFAULT 'pendente',
-    last_check TIMESTAMP,
-    response_ms INTEGER
-  )
-`).catch(err => console.error('Erro ao criar tabela monitor_sites:', err));
-
-// --- Authentication (login) ---
-app.post('/api/login', (req, res) => {
-  const { password } = req.body || {};
-  if (!password) return res.status(400).json({ error: 'Senha requerida' });
-
-  if (password === PANEL_PASSWORD) {
-    // HttpOnly cookie; secure:true requires HTTPS (Render uses HTTPS)
-    res.cookie('vm_uptime_auth', 'true', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000 // 1 day
-    });
-    return res.json({ success: true });
-  } else {
-    return res.status(401).json({ error: 'Senha incorreta' });
-  }
-});
-
-function requireAuth(req, res, next) {
-  if (req.cookies && req.cookies.vm_uptime_auth === 'true') return next();
-  return res.status(401).json({ error: 'Não autorizado' });
-}
-
-// --- API routes ---
-app.get('/api/sites', requireAuth, async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM monitor_sites ORDER BY id DESC');
-    res.json(result.rows);
-  } catch (err) {
-    console.error('GET /api/sites error:', err);
-    res.status(500).json({ error: 'Erro ao buscar sites' });
-  }
-});
-
-app.post('/api/sites', requireAuth, async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
-    await pool.query('INSERT INTO monitor_sites (url) VALUES ($1)', [url]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('POST /api/sites error:', err);
-    res.status(500).json({ error: 'Erro ao adicionar site' });
-  }
-});
-
-app.delete('/api/sites/:id', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query('DELETE FROM monitor_sites WHERE id = $1', [id]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('DELETE /api/sites/:id error:', err);
-    res.status(500).json({ error: 'Erro ao remover site' });
-  }
-});
-
-// Force immediate check (protected)
-app.post('/api/check-now', requireAuth, async (req, res) => {
-  try {
-    console.log('🔄 Forçando checagem manual via /api/check-now');
-    await checkAll();
-    res.json({ success: true });
-  } catch (err) {
-    console.error('POST /api/check-now error:', err);
-    res.status(500).json({ error: 'Erro ao rodar checagem' });
-  }
-});
-
-// health endpoint
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-// --- Checking logic ---
-// Helper: check a URL directly
-async function checkDirect(url) {
-  const start = Date.now();
-  const resp = await axios.get(url, {
-    timeout: 15000,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) VM-Uptime-Monitor',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8'
-    },
-    maxRedirects: 5,
-    validateStatus: null
-  });
-  const latency = Date.now() - start;
-  const ok = resp && resp.status >= 200 && resp.status < 400;
-  return { ok, status: resp ? resp.status : null, latency };
-}
-
-// Helper: ask the Cloudflare Worker (spy) to check for us
-async function checkViaSpy(targetUrl) {
-  const start = Date.now();
-  const workerUrl = `${SPY_URL}?url=${encodeURIComponent(targetUrl)}`;
-  const resp = await axios.get(workerUrl, { timeout: 15000, validateStatus: null });
-  const latency = Date.now() - start;
-  // Worker returns JSON: { target, status, ok, latency_ms, ... }
-  if (resp && resp.data) {
-    return {
-      ok: resp.data.ok === true,
-      status: resp.data.status || null,
-      latency: resp.data.latency_ms || latency
-    };
-  }
-  return { ok: false, status: resp ? resp.status : null, latency };
-}
-
-async function checkAll() {
-  try {
-    const result = await pool.query('SELECT * FROM monitor_sites');
-    const sites = result.rows;
-
-    for (let site of sites) {
-      try {
-        let isOnline = false;
-        let statusCode = null;
-        let latency = null;
-
-        // If it's our domain (vm-security.com) or subdomains, route via Worker to avoid IP-blocking
-        if (site.url.includes('vm-security.com') && SPY_URL) {
-          const r = await checkViaSpy(site.url);
-          isOnline = r.ok;
-          statusCode = r.status;
-          latency = r.latency;
-        } else {
-          const r = await checkDirect(site.url);
-          isOnline = r.ok;
-          statusCode = r.status;
-          latency = r.latency;
+        async function login() {
+            const password = document.getElementById('passInput').value;
+            const resp = await fetch(`${API_URL}/api/login`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'include', body: JSON.stringify({ password })
+            });
+            if (resp.ok) {
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('main-panel').style.display = 'block';
+                loadSites();
+                setInterval(() => {
+                    timer--;
+                    document.getElementById('update-timer').innerText = `Próxima atualização em ${timer}s`;
+                    if(timer <= 0) loadSites();
+                }, 1000);
+            } else { alert("Acesso negado!"); }
         }
 
-        const newStatus = isOnline ? 'online' : 'offline';
-        await pool.query(
-          'UPDATE monitor_sites SET status = $1, last_check = NOW(), response_ms = $2 WHERE id = $3',
-          [newStatus, latency || null, site.id]
-        );
-        console.log(`${isOnline ? '✅' : '❌'} ${site.url} -> ${newStatus} (status=${statusCode} latency=${latency}ms)`);
-      } catch (siteErr) {
-        console.error('Erro checando site', site.url, siteErr && siteErr.message);
-        await pool.query(
-          'UPDATE monitor_sites SET status = $1, last_check = NOW(), response_ms = $2 WHERE id = $3',
-          ['offline', null, site.id]
-        );
-      }
-    }
-  } catch (err) {
-    console.error('Erro checkAll:', err);
-  }
-}
+        async function loadSites() {
+            document.getElementById('loading').style.width = '40%';
+            const resp = await fetch(`${API_URL}/api/sites`, { credentials: 'include' });
+            const sites = await resp.json();
+            
+            const list = document.getElementById('siteList');
+            list.innerHTML = '';
+            sites.forEach(site => {
+                const isOnline = site.status === 'online';
+                const isHttps = site.url.startsWith('https');
+                const ms = site.response_ms || 0;
+                let msColor = '#22c55e';
+                if(ms > 600) msColor = '#eab308';
+                if(ms > 1500) msColor = '#ef4444';
 
-// Periodic scheduler: every 5 minutes
-const CHECK_INTERVAL_MS = 5 * 60 * 1000;
-setInterval(() => {
-  checkAll().catch(e => console.error('checkAll interval error:', e));
-}, CHECK_INTERVAL_MS);
+                list.innerHTML += `
+                    <div class="site-card ${site.status}">
+                        <div class="site-info">
+                            <h3>
+                                <span title="${isHttps ? 'SSL Protegido' : 'Inseguro'}">${isHttps ? '🛡️' : '⚠️'}</span>
+                                ${site.url}
+                            </h3>
+                            <div class="metrics">
+                                <div class="metric-item">⚡ <b style="color:${msColor}">${ms}ms</b></div>
+                                <div class="metric-item">🕒 ${site.last_check ? new Date(site.last_check).toLocaleTimeString() : '---'}</div>
+                                <div class="metric-item">${isHttps ? '🔒 HTTPS' : '🔓 HTTP'}</div>
+                            </div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:20px;">
+                            <span class="status-badge ${isOnline ? 'status-online' : 'status-offline'}">
+                                ${isOnline ? '● ONLINE' : '○ OFFLINE'}
+                            </span>
+                            <button class="btn-del" onclick="deleteSite(${site.id})">🗑️</button>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('loading').style.width = '100%';
+            setTimeout(() => document.getElementById('loading').style.width = '0%', 400);
+            timer = 30;
+        }
 
-// Initial run shortly after startup
-setTimeout(() => {
-  checkAll().catch(e => console.error('checkAll initial error:', e));
-}, 2000);
+        async function forceUpdate() {
+            const btn = document.getElementById('refreshBtn');
+            btn.innerText = '⌛...';
+            await fetch(`${API_URL}/api/check-now`, { method: 'POST', credentials: 'include' });
+            await loadSites();
+            btn.innerText = '🔄 ATUALIZAR';
+        }
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`VM Uptime API rodando na porta ${PORT}`);
-});
+        async function addSite() {
+            const url = document.getElementById('newSite').value;
+            if(!url) return;
+            await fetch(`${API_URL}/api/sites`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'include', body: JSON.stringify({ url })
+            });
+            document.getElementById('newSite').value = '';
+            loadSites();
+        }
+
+        async function deleteSite(id) {
+            if(!confirm('Remover monitoramento?')) return;
+            await fetch(`${API_URL}/api/sites/${id}`, { method: 'DELETE', credentials: 'include' });
+            loadSites();
+        }
+    </script>
+</body>
+</html>
