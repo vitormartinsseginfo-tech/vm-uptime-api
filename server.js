@@ -12,17 +12,16 @@ const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
 
+// COLOQUE O LINK DO SEU WORKER AQUI EMBAIXO:
+const SPY_URL = 'https://vm-spy.vitor.workers.dev'; 
+
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-app.use(cors({
-  origin: true,
-  credentials: true
-}));
+app.use(cors({ origin: true, credentials: true }));
 
-// Inicializa tabela
 pool.query(`
   CREATE TABLE IF NOT EXISTS monitor_sites (
     id SERIAL PRIMARY KEY,
@@ -32,14 +31,10 @@ pool.query(`
   )
 `).catch(err => console.error('Erro DB:', err));
 
-// Login
 app.post('/api/login', (req, res) => {
   if (req.body.password === PANEL_PASSWORD) {
     res.cookie('vm_uptime_auth', 'true', {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'none',
-      maxAge: 86400000
+      httpOnly: true, secure: true, sameSite: 'none', maxAge: 86400000
     });
     return res.json({ success: true });
   }
@@ -51,7 +46,6 @@ function requireAuth(req, res, next) {
   res.status(401).json({ error: 'Não autorizado' });
 }
 
-// Rotas
 app.get('/api/sites', requireAuth, async (req, res) => {
   const result = await pool.query('SELECT * FROM monitor_sites ORDER BY id DESC');
   res.json(result.rows);
@@ -67,21 +61,28 @@ app.delete('/api/sites/:id', requireAuth, async (req, res) => {
   res.json({ success: true });
 });
 
-// FUNÇÃO DE CHECAGEM COM TOKEN SECRETO
 async function checkAll() {
   const result = await pool.query('SELECT * FROM monitor_sites');
   for (let site of result.rows) {
     try {
-      await axios.get(site.url, {
-        timeout: 15000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-          'X-VM-Monitor': 'VM_SECURITY_SECRET_ACCESS_2026' // <--- TOKEN SECRETO
-        }
-      });
-      await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', ['online', site.id]);
+      let finalUrl = site.url;
+      
+      // Se for o seu site, usa o espião para burlar o bloqueio de IP
+      if (site.url.includes('vm-security.com')) {
+        finalUrl = `${SPY_URL}?url=${encodeURIComponent(site.url)}`;
+      }
+
+      const resp = await axios.get(finalUrl, { timeout: 15000 });
+      
+      if (resp.status >= 200 && resp.status < 400) {
+        await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', ['online', site.id]);
+        console.log(`✅ ${site.url} ONLINE`);
+      } else {
+        throw new Error('Status inválido');
+      }
     } catch (err) {
       await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', ['offline', site.id]);
+      console.log(`❌ ${site.url} OFFLINE`);
     }
   }
 }
