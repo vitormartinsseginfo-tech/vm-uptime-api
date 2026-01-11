@@ -47,16 +47,19 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Criar tabela básica usada pelo monitor
+// Criar tabela básica usada pelo monitor e garantir coluna response_ms
 pool.query(`
   CREATE TABLE IF NOT EXISTS monitor_sites (
     id SERIAL PRIMARY KEY,
     url TEXT NOT NULL,
     status TEXT DEFAULT 'pendente',
     last_check TIMESTAMP,
-    response_ms INTEGER
-  )
-`).catch(err => console.error('Erro criando tabela monitor_sites:', err));
+    response_ms INTEGER DEFAULT 0
+  );
+`).then(() => {
+  // Adiciona a coluna caso não exista (evita erro em bancos existentes)
+  return pool.query(`ALTER TABLE monitor_sites ADD COLUMN IF NOT EXISTS response_ms INTEGER DEFAULT 0;`);
+}).catch(err => console.error('Erro ao preparar tabela monitor_sites:', err));
 
 // -------------------- Auth / Sessão --------------------
 app.post('/api/login', (req, res) => {
