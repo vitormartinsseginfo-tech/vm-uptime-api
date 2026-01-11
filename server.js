@@ -245,7 +245,9 @@ app.get('/api/radar', requireAuth, async (req, res) => {
   const query = req.query.query || req.query.q;
   if (!query) return res.status(400).json({ error: 'Query missing' });
 
-  const workerUrl = `https://radar-api.vitor-martins.workers.dev/?q=${encodeURIComponent(query)}&num=20`;
+  // USAR A VARIÁVEL DO RENDER (RADAR_WORKER_URL)
+  const workerBaseUrl = process.env.RADAR_WORKER_URL || 'https://radar.vm-security.workers.dev';
+  const workerUrl = `${workerBaseUrl}/?q=${encodeURIComponent(query)}&num=20`;
 
   try {
     console.log("Tentando acessar:", workerUrl);
