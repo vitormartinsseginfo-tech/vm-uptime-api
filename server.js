@@ -255,10 +255,13 @@ app.get('/api/radar', requireAuth, async (req, res) => {
     
     return res.json(response.data);
   } catch (err) {
-    console.error('Erro detalhado:', err.response ? err.response.data : err.message);
-    return res.status(500).json({ error: 'Erro ao conectar com o motor de busca' });
-  }
-});
+      console.error('Erro detalhado:', err.message);
+      return res.status(500).json({ 
+        error: 'Erro ao conectar com o motor de busca',
+        details: err.message,
+        target: workerUrl 
+      });
+    }
 
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
