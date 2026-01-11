@@ -241,35 +241,22 @@ app.get('/api/proxy', requireAuth, async (req, res) => {
 // Endpoint protegido: GET /api/radar?query=nome+da+empresa&num=20
 // --- Radar proxy (Protegido) ---
 app.get('/api/radar', requireAuth, async (req, res) => {
-  // Pega o termo de busca. Aceita tanto 'query' quanto 'q' para evitar erros
   const query = req.query.query || req.query.q;
-  const num = req.query.num || '20';
-
-  if (!query) {
-    return res.status(400).json({ error: 'Termo de busca (query) não fornecido' });
-  }
+  if (!query) return res.status(400).json({ error: 'Query missing' });
 
   try {
-    if (RADAR_WORKER_URL) {
-      // Monta a URL para o seu Worker do Cloudflare usando o parâmetro 'q' que ele espera
-      const workerUrl = `${RADAR_WORKER_URL}?q=${encodeURIComponent(query)}&num=${num}`;
-      console.log("Solicitando ao Worker:", workerUrl);
-      
-      const workerResp = await axios.get(workerUrl, { timeout: 15000 });
-      return res.json(workerResp.data);
-    }
+    const workerUrl = `https://radar-api.vitor-martins.workers.dev/?q=${encodeURIComponent(query)}&num=20`;
+    console.log("Tentando acessar:", workerUrl);
 
-    // Caso você prefira usar a SerpApi direto pelo servidor no futuro
-    if (SERPAPI_KEY) {
-      const serpUrl = `https://serpapi.com/search.json?engine=google_maps&q=${encodeURIComponent(query)}&num=${num}&api_key=${SERPAPI_KEY}`;
-      const serpResp = await axios.get(serpUrl, { timeout: 15000 });
-      return res.json(serpResp.data);
-    }
-
-    return res.status(400).json({ error: 'Nenhum RADAR_WORKER_URL configurado no Render' });
+    const response = await axios.get(workerUrl, { 
+      timeout: 15000,
+      headers: { 'User-Agent': 'VM-Radar-Proxy' } 
+    });
+    
+    return res.json(response.data);
   } catch (err) {
-    console.error('Erro no Radar:', err.message);
-    return res.status(500).json({ error: 'Erro ao processar busca no Radar' });
+    console.error('Erro detalhado:', err.response ? err.response.data : err.message);
+    return res.status(500).json({ error: 'Erro ao conectar com o motor de busca' });
   }
 });
 
