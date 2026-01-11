@@ -12,8 +12,8 @@ const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
 
-// COLOQUE O LINK DO SEU WORKER AQUI EMBAIXO:
-const SPY_URL = 'https://vm-spy.vitor.workers.dev'; 
+// LINK DO SEU WORKER ATUALIZADO:
+const SPY_URL = 'https://monitor24x7.vm-security.workers.dev'; 
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -66,23 +66,28 @@ async function checkAll() {
   for (let site of result.rows) {
     try {
       let finalUrl = site.url;
-      
-      // Se for o seu site, usa o espião para burlar o bloqueio de IP
+      let isOnline = false;
+
+      // Se for o seu site ou subdomínio, usa o espião
       if (site.url.includes('vm-security.com')) {
-        finalUrl = `${SPY_URL}?url=${encodeURIComponent(site.url)}`;
+        const spyResponse = await axios.get(`${SPY_URL}?url=${encodeURIComponent(site.url)}`, { timeout: 15000 });
+        isOnline = spyResponse.data.ok === true;
+      } else {
+        // Para outros sites, checa direto
+        const directResp = await axios.get(site.url, { 
+            timeout: 15000,
+            headers: { 'User-Agent': 'Mozilla/5.0 VM-Monitor' }
+        });
+        isOnline = directResp.status >= 200 && directResp.status < 400;
       }
 
-      const resp = await axios.get(finalUrl, { timeout: 15000 });
-      
-      if (resp.status >= 200 && resp.status < 400) {
-        await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', ['online', site.id]);
-        console.log(`✅ ${site.url} ONLINE`);
-      } else {
-        throw new Error('Status inválido');
-      }
+      const newStatus = isOnline ? 'online' : 'offline';
+      await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', [newStatus, site.id]);
+      console.log(`${isOnline ? '✅' : '❌'} ${site.url} -> ${newStatus}`);
+
     } catch (err) {
       await pool.query('UPDATE monitor_sites SET status = $1, last_check = NOW() WHERE id = $2', ['offline', site.id]);
-      console.log(`❌ ${site.url} OFFLINE`);
+      console.log(`❌ ${site.url} -> offline (erro)`);
     }
   }
 }
