@@ -239,32 +239,37 @@ app.get('/api/proxy', requireAuth, async (req, res) => {
 // Uso (preferido): configure RADAR_WORKER_URL (Worker que faz a busca e evita CORS)
 // Alternativa: configure SERPAPI_KEY para que o servidor chame SerpApi direto.
 // Endpoint protegido: GET /api/radar?query=nome+da+empresa&num=20
+// --- Radar proxy (Protegido) ---
 app.get('/api/radar', requireAuth, async (req, res) => {
-  const query = req.query.query;
-  const num = parseInt(req.query.num || '20', 10);
+  // Pega o termo de busca. Aceita tanto 'query' quanto 'q' para evitar erros
+  const query = req.query.query || req.query.q;
+  const num = req.query.num || '20';
 
-  if (!query) return res.status(400).json({ error: 'query param missing' });
+  if (!query) {
+    return res.status(400).json({ error: 'Termo de busca (query) não fornecido' });
+  }
 
   try {
-    // 1) Se existir RADAR_WORKER_URL, delega para ele (melhor opção - evita expor SERPAPI_KEY)
     if (RADAR_WORKER_URL) {
-      const workerResp = await axios.get(`${RADAR_WORKER_URL}?q=${encodeURIComponent(query)}&num=${num}`, { timeout: 15000 });
+      // Monta a URL para o seu Worker do Cloudflare usando o parâmetro 'q' que ele espera
+      const workerUrl = `${RADAR_WORKER_URL}?q=${encodeURIComponent(query)}&num=${num}`;
+      console.log("Solicitando ao Worker:", workerUrl);
+      
+      const workerResp = await axios.get(workerUrl, { timeout: 15000 });
       return res.json(workerResp.data);
     }
 
-    // 2) Se SERPAPI_KEY está configurado, chamamos o SerpApi (exemplo)
+    // Caso você prefira usar a SerpApi direto pelo servidor no futuro
     if (SERPAPI_KEY) {
-      // Ajuste a URL/params conforme sua necessidade; este é um exemplo genérico para Google Maps via SerpApi
       const serpUrl = `https://serpapi.com/search.json?engine=google_maps&q=${encodeURIComponent(query)}&num=${num}&api_key=${SERPAPI_KEY}`;
       const serpResp = await axios.get(serpUrl, { timeout: 15000 });
       return res.json(serpResp.data);
     }
 
-    // 3) Se nenhum mecanismo configurado:
-    return res.status(400).json({ error: 'Nenhum RADAR_WORKER_URL ou SERPAPI_KEY configurado' });
+    return res.status(400).json({ error: 'Nenhum RADAR_WORKER_URL configurado no Render' });
   } catch (err) {
-    console.error('RADAR error:', err && err.message);
-    return res.status(500).json({ error: 'Erro ao executar busca radar' });
+    console.error('Erro no Radar:', err.message);
+    return res.status(500).json({ error: 'Erro ao processar busca no Radar' });
   }
 });
 
