@@ -240,28 +240,29 @@ app.get('/api/proxy', requireAuth, async (req, res) => {
 // Alternativa: configure SERPAPI_KEY para que o servidor chame SerpApi direto.
 // Endpoint protegido: GET /api/radar?query=nome+da+empresa&num=20
 // --- Radar proxy (Protegido) ---
+// --- Radar proxy (Protegido) ---
 app.get('/api/radar', requireAuth, async (req, res) => {
   const query = req.query.query || req.query.q;
   if (!query) return res.status(400).json({ error: 'Query missing' });
 
-  try {
-    const workerUrl = `https://radar-api.vitor-martins.workers.dev/?q=${encodeURIComponent(query)}&num=20`;
-    console.log("Tentando acessar:", workerUrl);
+  const workerUrl = `https://radar-api.vitor-martins.workers.dev/?q=${encodeURIComponent(query)}&num=20`;
 
+  try {
+    console.log("Tentando acessar:", workerUrl);
     const response = await axios.get(workerUrl, { 
       timeout: 15000,
       headers: { 'User-Agent': 'VM-Radar-Proxy' } 
     });
-    
     return res.json(response.data);
   } catch (err) {
-      console.error('Erro detalhado:', err.message);
-      return res.status(500).json({ 
-        error: 'Erro ao conectar com o motor de busca',
-        details: err.message,
-        target: workerUrl 
-      });
-    }
+    console.error('Erro no Radar:', err.message);
+    return res.status(500).json({ 
+      error: 'Erro ao conectar com o motor de busca',
+      details: err.message,
+      target: workerUrl 
+    });
+  }
+});
 
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
