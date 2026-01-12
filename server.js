@@ -270,100 +270,79 @@ app.get('/api/radar', requireAuth, async (req, res) => {
 });
 
 
-// --- DeHashed + Monitor (cole este bloco no server.js, antes do app.listen) ---
+// --- Configurações DeHashed (Certifique-se que estas variáveis estão no topo do arquivo) ---
+const DEHASHED_API_KEY = process.env.DEHASHED_API_KEY;
+const DEHASHED_API_SECRET = process.env.DEHASHED_API_SECRET;
 
-// Endpoint simples para o frontend checar se a sessão é válida
+// --- Endpoints de Autenticação e Segurança ---
+
+// Endpoint para o frontend verificar se a sessão ainda é válida
 app.get('/api/auth/check', (req, res) => {
-  if (req.cookies && req.cookies.vm_uptime_auth === 'true') return res.json({ ok: true });
-  return res.status(401).json({ ok: false });
+  if (req.cookies && req.cookies.vm_uptime_auth === 'true') {
+    return res.json({ authenticated: true });
+  }
+  return res.status(401).json({ authenticated: false });
 });
 
-// Busca avançada no DeHashed com filtro (tipo)
+// --- Endpoints DeHashed Avançados ---
+
 app.get('/api/dehashed/search', requireAuth, async (req, res) => {
   const { query, type } = req.query;
   if (!query) return res.status(400).json({ error: 'Query é obrigatória' });
-
-  if (!process.env.DEHASHED_API_KEY || !process.env.DEHASHED_API_SECRET) {
-    return res.status(500).json({ error: 'DEHASHED API key não configurada' });
+  
+  if (!DEHASHED_API_KEY || !DEHASHED_API_SECRET) {
+    return res.status(500).json({ error: 'API DeHashed não configurada no Render' });
   }
 
-  const auth = 'Basic ' + Buffer.from(`${process.env.DEHASHED_API_KEY}:${process.env.DEHASHED_API_SECRET}`).toString('base64');
+  const auth = 'Basic ' + Buffer.from(`${DEHASHED_API_KEY}:${DEHASHED_API_SECRET}`).toString('base64');
+  
+  // Mapeamento exato dos filtros que você pediu
+  const typeMap = {
+    all: '',
+    email: 'email',
+    username: 'username',
+    password: 'password',
+    hashed_password: 'hashed_password',
+    ip_address: 'ip_address',
+    name: 'name',
+    address: 'address',
+    phone: 'phone',
+    vin: 'vin',
+    domain_scan: 'domain_scan'
+  };
 
-  // map de tipos (ajuste se necessário)
-  const allowedTypes = new Set([
-    'all','email','username','password','hashed_password',
-    'ip_address','name','address','phone','vin','domain_scan'
-  ]);
-  const t = (type && allowedTypes.has(type)) ? type : 'all';
-  const finalQuery = (t !== 'all') ? `${t}:"${query}"` : query;
+  const filter = typeMap[type] || '';
+  const finalQuery = filter ? `${filter}:"${query}"` : query;
 
   try {
     const url = `https://api.dehashed.com/search?query=${encodeURIComponent(finalQuery)}`;
-    const resp = await axios.get(url, {
+    const resp = await axios.get(url, { 
       headers: { Authorization: auth, Accept: 'application/json' },
-      timeout: 25000
+      timeout: 25000 
     });
-    return res.json(resp.data);
+    res.json(resp.data);
   } catch (err) {
-    console.error('DeHashed search error:', err && err.message ? err.message : err);
-    return res.status(500).json({ error: 'Erro ao consultar DeHashed', details: err.message || err });
+    res.status(500).json({ error: 'Erro DeHashed', details: err.message });
   }
 });
 
-// --- Monitoramento de domínios (CRUD) ---
+// --- Monitoramento de Domínios ---
+
 app.get('/api/monitor/domains', requireAuth, async (req, res) => {
-  try {
-    const r = await pool.query('SELECT * FROM monitored_domains ORDER BY id DESC');
-    res.json(r.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao listar domínios' });
-  }
+  const r = await pool.query('SELECT * FROM monitored_domains ORDER BY id DESC');
+  res.json(r.rows);
 });
 
 app.post('/api/monitor/domains', requireAuth, async (req, res) => {
-  try {
-    const { domain } = req.body;
-    if (!domain) return res.status(400).json({ error: 'domain é obrigatório' });
-    await pool.query('INSERT INTO monitored_domains (domain) VALUES ($1) ON CONFLICT (domain) DO NOTHING', [domain]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao adicionar domínio' });
-  }
+  const { domain } = req.body;
+  if (!domain) return res.status(400).json({ error: 'Domínio obrigatório' });
+  await pool.query('INSERT INTO monitored_domains (domain) VALUES ($1) ON CONFLICT (domain) DO NOTHING', [domain]);
+  res.json({ success: true });
 });
 
 app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM monitored_domains WHERE id = $1', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao remover domínio' });
-  }
-});
-
-// Forçar checagem manual (opcional) — usa o mesmo checkDeHashedForDomain que você já tem/terá
-app.post('/api/monitor/check-now', requireAuth, async (req, res) => {
-  try {
-    const { domain } = req.body || {};
-    if (domain) {
-      // runCheckAndPersist é a função que faz a chamada DeHashed e persiste no DB
-      const result = await runCheckAndPersist(domain);
-      return res.json({ success: true, result });
-    } else {
-      // Checar todos
-      const rows = (await pool.query('SELECT domain FROM monitored_domains')).rows;
-      const out = [];
-      for (const r of rows) {
-        out.push(await runCheckAndPersist(r.domain));
-      }
-      return res.json({ success: true, results: out });
-    }
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao executar checagem' });
-  }
+  await pool.query('DELETE FROM monitored_domains WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
 });
 
 // -------------------- Start server --------------------
