@@ -270,162 +270,54 @@ app.get('/api/radar', requireAuth, async (req, res) => {
 });
 
 
-// --- Monitoramento DeHashed (adicionar ao server.js) ---
-const DEHASHED_API_KEY = process.env.DEHASHED_API_KEY || null;
-const DEHASHED_API_SECRET = process.env.DEHASHED_API_SECRET || null;
-// interval in hours (default 24)
-const MONITOR_INTERVAL_HOURS = parseInt(process.env.DEHASHED_MONITOR_INTERVAL_HOURS || '24', 10);
+// --- Endpoints DeHashed Avançados ---
 
-// Criar tabela de monitoramento de domínios (segura)
-pool.query(`
-  CREATE TABLE IF NOT EXISTS monitored_domains (
-    id SERIAL PRIMARY KEY,
-    domain TEXT NOT NULL UNIQUE,
-    last_check TIMESTAMP,
-    last_count INTEGER DEFAULT 0,
-    last_result JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
-  );
-`).then(() => {
-  return pool.query(`
-    ALTER TABLE monitored_domains
-      ADD COLUMN IF NOT EXISTS last_count INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS last_result JSONB;
-  `);
-}).catch(err => console.error('Erro ao preparar tabela monitored_domains:', err));
-
-// Helper: consulta DeHashed (ou retorna aviso se sem credenciais)
-async function checkDeHashedForDomain(domain) {
+// Busca Manual com Filtros
+app.get('/api/dehashed/search', requireAuth, async (req, res) => {
+  const { query, type } = req.query;
+  if (!query) return res.status(400).json({ error: 'Query é obrigatória' });
+  
   if (!DEHASHED_API_KEY || !DEHASHED_API_SECRET) {
-    return { ok: false, error: 'DEHASHED_API_KEY/SECRET not configured', count: 0, data: null };
+    return res.status(500).json({ error: 'API DeHashed não configurada no Render' });
   }
 
-  // Monta auth Basic (ajuste se DeHashed usar outro modelo)
   const auth = 'Basic ' + Buffer.from(`${DEHASHED_API_KEY}:${DEHASHED_API_SECRET}`).toString('base64');
-
+  
   try {
-    // Endpoint exemplo — ajuste conforme a docs do DeHashed (query por domain)
-    const url = `https://api.dehashed.com/search?query=${encodeURIComponent(domain)}`;
-    const resp = await axios.get(url, {
+    // Se o tipo for informado (ex: email, ip), formatamos a query conforme a documentação do DeHashed
+    const finalQuery = type && type !== 'all' ? `${type}:"${query}"` : query;
+    
+    const url = `https://api.dehashed.com/search?query=${encodeURIComponent(finalQuery)}`;
+    const resp = await axios.get(url, { 
       headers: { Authorization: auth, Accept: 'application/json' },
-      timeout: 30000
+      timeout: 25000 
     });
-    // resp.data deve conter os resultados; contar entries se existir
-    const entries = resp.data && Array.isArray(resp.data.entries) ? resp.data.entries : (resp.data && resp.data.length ? resp.data : []);
-    const count = entries.length || (resp.data.total ? resp.data.total : 0);
-    return { ok: true, count, data: resp.data };
+    
+    res.json(resp.data);
   } catch (err) {
-    console.error('Erro DeHashed:', err && err.message ? err.message : err);
-    return { ok: false, error: (err && err.message) || 'DeHashed error', count: 0, data: null };
+    console.error('Erro DeHashed Search:', err.message);
+    res.status(500).json({ error: 'Erro ao consultar DeHashed', details: err.message });
   }
-}
+});
 
-// Endpoints CRUD para domínios monitorados
+// Listar domínios monitorados
 app.get('/api/monitor/domains', requireAuth, async (req, res) => {
-  try {
-    const r = await pool.query('SELECT * FROM monitored_domains ORDER BY id DESC');
-    res.json(r.rows);
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao buscar domínios' }); }
+  const r = await pool.query('SELECT * FROM monitored_domains ORDER BY id DESC');
+  res.json(r.rows);
 });
 
+// Adicionar domínio
 app.post('/api/monitor/domains', requireAuth, async (req, res) => {
-  const { domain } = req.body || {};
-  if (!domain) return res.status(400).json({ error: 'domain é obrigatório' });
-  try {
-    await pool.query('INSERT INTO monitored_domains (domain) VALUES ($1) ON CONFLICT (domain) DO NOTHING', [domain]);
-    res.json({ success: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao adicionar domínio' }); }
+  const { domain } = req.body;
+  await pool.query('INSERT INTO monitored_domains (domain) VALUES ($1) ON CONFLICT (domain) DO NOTHING', [domain]);
+  res.json({ success: true });
 });
 
+// Remover domínio
 app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
-  const { id } = req.params;
-  try {
-    await pool.query('DELETE FROM monitored_domains WHERE id = $1', [id]);
-    res.json({ success: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao remover domínio' }); }
+  await pool.query('DELETE FROM monitored_domains WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
 });
-
-// Forçar check manual (para 1 domínio ou todos se none)
-app.post('/api/monitor/check-now', requireAuth, async (req, res) => {
-  const domain = req.body && req.body.domain;
-  try {
-    if (domain) {
-      const result = await runCheckAndPersist(domain);
-      return res.json({ success: true, result });
-    } else {
-      const rows = (await pool.query('SELECT domain FROM monitored_domains')).rows;
-      const results = [];
-      for (const r of rows) {
-        results.push(await runCheckAndPersist(r.domain));
-      }
-      return res.json({ success: true, results });
-    }
-  } catch (err) {
-    console.error('Erro /api/monitor/check-now', err);
-    return res.status(500).json({ error: 'Erro ao executar checagem' });
-  }
-});
-
-// Função que executa a checagem, persiste e retorna resumo
-async function runCheckAndPersist(domain) {
-  const now = new Date();
-  const check = await checkDeHashedForDomain(domain);
-  try {
-    // Fetch existing last_count (se existir)
-    const row = (await pool.query('SELECT id, last_count FROM monitored_domains WHERE domain=$1', [domain])).rows[0];
-    const lastCount = row ? (row.last_count || 0) : 0;
-
-    // Persistar resultado e atualizar last_check/last_count/last_result
-    const newCount = check.count || 0;
-    await pool.query(
-      `UPDATE monitored_domains SET last_check = NOW(), last_count = $1, last_result = $2 WHERE domain = $3`,
-      [newCount, check.data ? JSON.stringify(check.data) : null, domain]
-    );
-
-    // Se não existir linha (nova), inserir de forma segura
-    if (!row) {
-      await pool.query(
-        `INSERT INTO monitored_domains (domain, last_check, last_count, last_result) VALUES ($1, NOW(), $2, $3) ON CONFLICT DO NOTHING`,
-        [domain, newCount, check.data ? JSON.stringify(check.data) : null]
-      );
-    }
-
-    const changed = newCount !== lastCount;
-    return { domain, ok: check.ok, error: check.error || null, lastCount, newCount, changed };
-  } catch (err) {
-    console.error('Erro persisting check for', domain, err);
-    return { domain, ok: false, error: err.message || 'DB error' };
-  }
-}
-
-// Monitor loop agendado (apenas se MONITOR_INTERVAL_HOURS > 0)
-let monitorTimer = null;
-async function monitorLoop() {
-  try {
-    console.log('MonitorLoop: iniciando varredura DeHashed');
-    const rows = (await pool.query('SELECT domain FROM monitored_domains')).rows;
-    for (const r of rows) {
-      const res = await runCheckAndPersist(r.domain);
-      if (res.changed && res.newCount > res.lastCount) {
-        console.log(`ALERTA: domínio ${r.domain} tem novos vazamentos: ${res.lastCount} -> ${res.newCount}`);
-        // Aqui você pode: enviar email, gravar um evento, ou setar flag para o frontend mostrar alerta
-      }
-    }
-    console.log('MonitorLoop: finalizado');
-  } catch (err) {
-    console.error('monitorLoop error:', err);
-  }
-}
-
-// Inicia agendador se intervalo > 0
-if (MONITOR_INTERVAL_HOURS > 0) {
-  const ms = MONITOR_INTERVAL_HOURS * 60 * 60 * 1000;
-  // roda a primeira vez após 1 minuto (evitar carga na startup)
-  setTimeout(() => {
-    monitorLoop().catch(e => console.error(e));
-    monitorTimer = setInterval(() => monitorLoop().catch(e => console.error(e)), ms);
-  }, 60 * 1000);
-}
 
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
