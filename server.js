@@ -345,6 +345,81 @@ app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
   res.json({ success: true });
 });
 
+// --- NOVO: ROTA DO VULNERABILITY SCANNER ---
+app.get('/api/scan', async (req, res) => {
+    const target = req.query.url;
+    if (!target) return res.status(400).json({ error: 'URL é obrigatória' });
+
+    // Garante que a URL comece com http
+    const url = target.startsWith('http') ? target : `https://${target}`;
+    const results = {
+        target: url,
+        score: 100,
+        vulnerabilities: [],
+        tech: {}
+    };
+
+    try {
+        // 1. Teste de Conexão e Headers
+        const response = await axios.get(url, { 
+            timeout: 10000, 
+            validateStatus: false,
+            headers: { 'User-Agent': 'VM-Security-Scanner/1.0' }
+        });
+
+        results.tech.server = response.headers['server'] || 'Não identificado';
+        results.tech.poweredBy = response.headers['x-powered-by'] || 'Não identificado';
+
+        // 2. Verificação de Arquivos Sensíveis (Caminhos comuns que vazam dados)
+        const pathsToTest = [
+            { path: '/.env', name: 'Arquivo de Configuração (.env)', severity: 'CRÍTICO', desc: 'Contém senhas de banco de dados e chaves de API.' },
+            { path: '/.git/config', name: 'Repositório Git Exposto', severity: 'CRÍTICO', desc: 'Permite baixar todo o código-fonte do site.' },
+            { path: '/wp-config.php.bak', name: 'Backup de Configuração WordPress', severity: 'ALTO', desc: 'Pode conter credenciais de acesso ao site.' },
+            { path: '/phpinfo.php', name: 'PHP Info Exposto', severity: 'MÉDIO', desc: 'Revela detalhes internos do servidor para hackers.' }
+        ];
+
+        for (const item of pathsToTest) {
+            try {
+                const check = await axios.get(`${url}${item.path}`, { timeout: 3000, validateStatus: false });
+                if (check.status === 200) {
+                    results.vulnerabilities.push(item);
+                    results.score -= 25;
+                }
+            } catch (e) { /* ignore errors */ }
+        }
+
+        // 3. Verificação de Cookies Inseguros
+        const cookies = response.headers['set-cookie'];
+        if (cookies) {
+            const insecure = cookies.some(c => !c.toLowerCase().includes('httponly') || !c.toLowerCase().includes('secure'));
+            if (insecure) {
+                results.vulnerabilities.push({
+                    name: 'Cookies Inseguros',
+                    severity: 'MÉDIO',
+                    desc: 'Cookies de sessão sem flag HttpOnly/Secure podem ser roubados por scripts maliciosos.'
+                });
+                results.score -= 10;
+            }
+        }
+
+        // 4. Verificação de Proteção contra Clickjacking
+        if (!response.headers['x-frame-options']) {
+            results.vulnerabilities.push({
+                name: 'Falta de Proteção contra Clickjacking',
+                severity: 'BAIXO',
+                desc: 'Permite que seu site seja exibido dentro de outros sites para enganar usuários.'
+            });
+            results.score -= 5;
+        }
+
+        if (results.score < 0) results.score = 0;
+        res.json(results);
+
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao escanear o site: ' + error.message });
+    }
+});
+
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
   console.log(`VM Security API rodando na porta ${PORT}`);
