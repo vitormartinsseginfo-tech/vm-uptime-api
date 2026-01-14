@@ -432,6 +432,35 @@ app.get('/api/auth-test', async (req, res) => {
     res.json({ status: "Conectado ao Supabase com sucesso!" });
 });
 
+// Rota para Login
+app.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+    
+    const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+    });
+
+    if (error) return res.status(401).json({ error: error.message });
+
+    // Busca o nome do usuário na tabela profiles
+    const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, role')
+        .eq('id', data.user.id)
+        .single();
+
+    res.json({ 
+        token: data.session.access_token, 
+        user: {
+            id: data.user.id,
+            email: data.user.email,
+            name: profile ? profile.full_name : 'Usuário',
+            role: profile ? profile.role : 'funcionario'
+        }
+    });
+});
+
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
   console.log(`VM Security API rodando na porta ${PORT}`);
