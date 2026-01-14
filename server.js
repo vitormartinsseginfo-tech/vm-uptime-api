@@ -229,6 +229,114 @@ app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ===== ROTA DE SCAN DE VULNERABILIDADES =====
+// GET /api/scan?url=<URL>
+// Requer autenticação via requireAuth ou header x-service-token (veja requireAuth)
+app.get('/api/scan', requireAuth, async (req, res) => {
+  const raw = req.query.url;
+  console.log('[SCAN] request received for url:', raw);
+
+  if (!raw) return res.status(400).json({ error: 'URL ausente. Use ?url=https://exemplo.com' });
+
+  // Normaliza e valida a URL básica
+  let target;
+  try {
+    target = raw.trim();
+    if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
+    // validação simples
+    const u = new URL(target);
+    // não permitir internal hosts (opcional)
+    if (['localhost', '127.0.0.1'].includes(u.hostname)) {
+      return res.status(400).json({ error: 'Host não permitido' });
+    }
+  } catch (err) {
+    return res.status(400).json({ error: 'URL inválida' });
+  }
+
+  try {
+    // Request ao alvo
+    const response = await axios.get(target, {
+      headers: {
+        'User-Agent': 'VM-Security-Scanner/1.0 (+https://vm-security.com)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 12000,
+      maxRedirects: 5,
+      validateStatus: null // vamos tratar status manualmente
+    });
+
+    const statusCode = response.status;
+    const headers = Object.keys(response.headers).reduce((acc, k) => {
+      acc[k.toLowerCase()] = response.headers[k];
+      return acc;
+    }, {});
+
+    // Construir lista de vulnerabilidades simples baseada nos headers
+    const vulns = [];
+    let score = 100;
+
+    // HSTS
+    if (!headers['strict-transport-security']) {
+      vulns.push({ name: 'HSTS ausente', severity: 'MEDIUM', desc: 'Strict-Transport-Security header missing' });
+      score -= 15;
+    }
+
+    // CSP
+    if (!headers['content-security-policy']) {
+      vulns.push({ name: 'CSP ausente', severity: 'HIGH', desc: 'Content-Security-Policy header missing' });
+      score -= 25;
+    }
+
+    // X-Frame-Options or frame-ancestors
+    if (!headers['x-frame-options'] && !(headers['content-security-policy'] && /frame-ancestors/i.test(headers['content-security-policy']))) {
+      vulns.push({ name: 'Proteção contra clickjacking ausente', severity: 'MEDIUM', desc: 'No X-Frame-Options or frame-ancestors CSP found' });
+      score -= 10;
+    }
+
+    // X-Content-Type-Options
+    if (!headers['x-content-type-options']) {
+      vulns.push({ name: 'X-Content-Type-Options ausente', severity: 'LOW', desc: 'Missing header to prevent MIME sniffing' });
+      score -= 5;
+    }
+
+    // Referrer-Policy
+    if (!headers['referrer-policy']) {
+      vulns.push({ name: 'Referrer-Policy ausente', severity: 'LOW', desc: 'Missing Referrer-Policy header' });
+      score -= 2;
+    }
+
+    // Server disclosure
+    const serverHeader = headers['server'] || 'Oculto';
+    const powered = headers['x-powered-by'] || headers['x-generator'] || 'Não detectado';
+
+    // Handle non-2xx responses: consider them as potential fingerprinting/info-leak issues but don't fail
+    if (statusCode >= 400) {
+      vulns.push({ name: `Resposta HTTP ${statusCode}`, severity: 'INFO', desc: `O alvo respondeu com status ${statusCode}` });
+      // não reduzir muito o score apenas por status, pois pode ser proteção
+    }
+
+    const result = {
+      target,
+      status: statusCode,
+      score: Math.max(0, score),
+      tech: {
+        server: serverHeader,
+        poweredBy: powered
+      },
+      vulnerabilities: vulns,
+      headers // retorna os headers crus para diagnóstico no frontend
+    };
+
+    console.log('[SCAN] result for', target, 'score', result.score, 'vulns', result.vulnerabilities.length);
+    return res.json(result);
+  } catch (err) {
+    console.error('[SCAN] error for', target, err && (err.message || err));
+    // Timeout / DNS / SSL errors
+    if (err.code === 'ECONNABORTED') return res.status(504).json({ error: 'Timeout ao contatar o alvo.' });
+    return res.status(502).json({ error: 'Falha ao acessar o alvo. (' + (err.code || 'unknown') + ')' });
+  }
+});
+
 // ========== START ==========
 app.listen(PORT, () => {
   console.log(`API rodando na porta ${PORT}`);
