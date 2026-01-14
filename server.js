@@ -437,6 +437,7 @@ app.get('/api/auth-test', async (req, res) => {
 // Rota para Login
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
+  console.log("DEBUG LOGIN:", email, password ? "Senha recebida" : "Senha VAZIA");
     
     // 1. Autentica o usuário no Supabase Auth
     const authRes = await supabase.auth.signInWithPassword({
