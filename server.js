@@ -73,22 +73,26 @@ pool.query(`
   return pool.query(`ALTER TABLE monitor_sites ADD COLUMN IF NOT EXISTS response_ms INTEGER DEFAULT 0;`);
 }).catch(err => console.error('Erro ao preparar tabela monitor_sites:', err));
 
-// -------------------- Auth / Sessão --------------------
+// Rota de Login Unificada (Usa a senha do Hunter/Monitor)
 app.post('/api/login', (req, res) => {
-  const { password } = req.body || {};
-  if (!password) return res.status(400).json({ error: 'Senha requerida' });
+  const { password } = req.body;
+  
+  // PANEL_PASSWORD é a variável que você já tem no Render
+  const MASTER_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
 
-  if (password === PANEL_PASSWORD) {
-    // Cookie HttpOnly; secure:true exige HTTPS (Render tem HTTPS)
+  if (password === MASTER_PASSWORD) {
+    // Cria o cookie de sessão (Libera todas as ferramentas)
     res.cookie('vm_uptime_auth', 'true', {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
       maxAge: 24 * 60 * 60 * 1000 // 1 dia
     });
-    return res.json({ success: true });
+
+    return res.json({ success: true, name: 'Vitor Martins' });
   }
-  return res.status(401).json({ error: 'Senha incorreta' });
+
+  return res.status(401).json({ error: 'Senha mestra incorreta' });
 });
 
 app.post('/api/logout', (req, res) => {
