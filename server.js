@@ -1,60 +1,43 @@
-// server.js - VM Security Unified API (Token + Monitor)
+// server.js - VM Security Unified API (Híbrido: Master password + Supabase + Firebase Admin)
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { Pool } = require('pg');
 const cookieParser = require('cookie-parser');
 const { createClient } = require('@supabase/supabase-js');
+const admin = require('firebase-admin');
 
 const app = express();
 
 // ========== CONFIG ==========
 const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_URL || null;
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
 const SUPABASE_URL = process.env.SUPABASE_URL || null;
 const SUPABASE_KEY = process.env.SUPABASE_KEY || null;
+const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT || null; // JSON string
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT || null;
 
-// Supabase client (optional)
+// ========== OPTIONAL SUPABASE CLIENT ==========
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
   supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 }
 
-// ========== MIDDLEWARE ==========
-app.use(express.json());
-app.use(cookieParser());
-
-// CORS - permita seus domínios de frontend aqui (ou use origin: true para dev)
-app.use(cors({
-  origin: (origin, cb) => {
-    // Ajuste as origens permitidas:
-    const allowed = [
-      'https://vulnerability.vm-security.com',
-      'https://vmleakhunter.vm-security.com',
-      'https://vm-security.com',
-      // adicionar outras origens necessárias
-    ];
-    if (!origin || allowed.includes(origin)) return cb(null, true);
-    return cb(new Error('CORS not allowed'), false);
-  },
-  credentials: true,
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization']
-}));
-
-// ========== DATABASE ==========
-if (!DATABASE_URL) {
+// ========== DATABASE (pg Pool) ==========
+let pool = null;
+if (DATABASE_URL) {
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+} else {
   console.warn('WARNING: DATABASE_URL not set. Monitor routes will fail without a DB.');
 }
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: DATABASE_URL ? { rejectUnauthorized: false } : false
-});
 
-// Ensure monitored_domains table exists
+// Ensure monitored_domains table exists (if DB configured)
 async function ensureTables() {
-  if (!DATABASE_URL) return;
+  if (!pool) return;
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS monitored_domains (
@@ -71,19 +54,92 @@ async function ensureTables() {
 }
 ensureTables().catch(console.error);
 
-// ========== AUTH MIDDLEWARE (Híbrido: Cookie ou Token) ==========
-function requireAuth(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  // Se tiver o cookie vm_uptime_auth === 'true' OU token 'vm_access_granted', libera
-  if ((req.cookies && req.cookies.vm_uptime_auth === 'true') || token === 'vm_access_granted') {
-    return next();
+// ========== FIREBASE ADMIN INIT (OPTIONAL) ==========
+if (FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    // FIREBASE_SERVICE_ACCOUNT should be the full JSON (string). Example: process.env.FIREBASE_SERVICE_ACCOUNT = JSON.stringify(serviceAccount)
+    const serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id || FIREBASE_PROJECT_ID
+    });
+    console.log('Firebase Admin inicializado via JSON de serviço.');
+  } catch (err) {
+    console.error('Erro ao inicializar Firebase Admin com FIREBASE_SERVICE_ACCOUNT:', err);
   }
-  return res.status(401).json({ error: 'Não autorizado' });
+} else if (FIREBASE_PROJECT_ID) {
+  // Fallback: Initialize with projectId only (may work in some envs with Google default credentials)
+  try {
+    admin.initializeApp({ projectId: FIREBASE_PROJECT_ID });
+    console.log('Firebase Admin inicializado com projectId (sem chave explícita).');
+  } catch (err) {
+    console.error('Erro ao inicializar Firebase Admin com projectId:', err);
+  }
+} else {
+  console.log('Firebase Admin não configurado. Rotas Firebase não serão validadas.');
 }
 
-// ========== ROTA DE LOGIN (Gera Token + Cookie) ==========
+// ========== MIDDLEWARE ==========
+app.use(express.json());
+app.use(cookieParser());
+
+// CORS - ajustar origens conforme necessário
+app.use(cors({
+  origin: (origin, cb) => {
+    const allowed = [
+      'https://vulnerability.vm-security.com',
+      'https://dashboard.vm-security.com',
+      'https://vmleakhunter.vm-security.com',
+      'https://vm-security.com',
+      'https://radar.vm-security.com',
+      // adicione outras origens necessárias
+    ];
+    if (!origin || allowed.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS not allowed'), false);
+  },
+  credentials: true,
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}));
+
+// ========== AUTH MIDDLEWARE (Híbrido: Cookie || Legacy token || Firebase Token) ==========
+async function requireAuth(req, res, next) {
+  try {
+    // 1) Cookie-based session (legacy)
+    if (req.cookies && req.cookies.vm_uptime_auth === 'true') {
+      return next();
+    }
+
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+
+    // 2) Legacy static token for compatibility (`vm_access_granted`)
+    if (token === 'vm_access_granted') {
+      return next();
+    }
+
+    // 3) Firebase token (if admin initialized)
+    if (token && admin.apps && admin.apps.length > 0) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        // opcionalmente, você pode checar decoded.aud / decoded.iss / decoded.email_verified etc.
+        req.user = decoded;
+        return next();
+      } catch (err) {
+        console.warn('Firebase token inválido:', err.message || err);
+        return res.status(401).json({ error: 'Token Firebase inválido ou expirado.' });
+      }
+    }
+
+    // 4) Se chegou aqui, negar
+    return res.status(401).json({ error: 'Não autorizado. Forneça credenciais válidas.' });
+  } catch (err) {
+    console.error('Erro no requireAuth:', err);
+    return res.status(500).json({ error: 'Erro interno de autenticação' });
+  }
+}
+
+// ========== ROTA DE LOGIN (Mantemos master password + Supabase) ==========
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -91,7 +147,7 @@ app.post('/api/login', async (req, res) => {
 
     let authenticated = false;
 
-    // 1) Senha Mestra
+    // 1) Senha Mestra (legacy)
     if (password && password === MASTER_PASSWORD) {
       authenticated = true;
     } 
@@ -110,11 +166,11 @@ app.post('/api/login', async (req, res) => {
         maxAge: 24 * 60 * 60 * 1000
       });
 
-      // Retorna token também (para frontends que usam token)
+      // Retorna token também (legacy token para compatibilidade)
       return res.json({ success: true, token: 'vm_access_granted', user: { email: email || 'admin@vm-security.com' } });
     }
 
-    return res.status(401).json({ error: 'Senha incorreta' });
+    return res.status(401).json({ error: 'Senha ou credenciais incorretas' });
   } catch (err) {
     console.error('Erro no login:', err);
     return res.status(500).json({ error: 'Erro interno' });
@@ -123,7 +179,6 @@ app.post('/api/login', async (req, res) => {
 
 // ========== ROTA DE LOGOUT ==========
 app.post('/api/logout', (req, res) => {
-  // Limpa cookie (informa o browser)
   res.clearCookie('vm_uptime_auth', { httpOnly: true, secure: true, sameSite: 'none' });
   return res.json({ success: true });
 });
@@ -166,19 +221,19 @@ app.get('/api/scan', requireAuth, async (req, res) => {
     results.score = Math.max(0, results.score);
     res.json(results);
   } catch (err) {
-    console.error('scan error', err.message);
-    res.status(500).json({ error: 'Erro ao acessar site: ' + err.message });
+    console.error('scan error', err.message || err);
+    res.status(500).json({ error: 'Erro ao acessar site: ' + (err.message || 'unknown') });
   }
 });
 
 // Rota de verificação simples
 app.get('/api/auth/check', requireAuth, (req, res) => {
-  res.json({ authenticated: true });
+  res.json({ authenticated: true, user: req.user || null });
 });
 
-// ========== ROTAS DO LEAK HUNTER (MONITORAMENTO) ==========
+// ========== ROTAS DO MONITORAMENTO ==========
 app.get('/api/monitor/domains', requireAuth, async (req, res) => {
-  if (!DATABASE_URL) return res.status(500).json({ error: 'Banco de dados não configurado' });
+  if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
   try {
     const result = await pool.query('SELECT id, domain, last_count, last_check FROM monitored_domains ORDER BY id DESC');
     res.json(result.rows);
@@ -189,7 +244,7 @@ app.get('/api/monitor/domains', requireAuth, async (req, res) => {
 });
 
 app.post('/api/monitor/domains', requireAuth, async (req, res) => {
-  if (!DATABASE_URL) return res.status(500).json({ error: 'Banco de dados não configurado' });
+  if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
   const { domain } = req.body || {};
   if (!domain) return res.status(400).json({ error: 'Domain required' });
   try {
@@ -202,7 +257,7 @@ app.post('/api/monitor/domains', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
-  if (!DATABASE_URL) return res.status(500).json({ error: 'Banco de dados não configurado' });
+  if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
   try {
     await pool.query('DELETE FROM monitored_domains WHERE id = $1', [req.params.id]);
     res.json({ success: true });
@@ -214,9 +269,7 @@ app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
 
 // ========== PLACEHOLDER: DeHashed / Busca ==========
 app.get('/api/dehashed/search', requireAuth, async (req, res) => {
-  // Implementar integração com DeHashed/Outras APIs aqui se tiver a API Key.
-  // Por enquanto retorna vazio para não quebrar frontend.
-  res.json({ total: 0, entries: [] });
+  res.json({ total: 0, entries: [], user: req.user || null });
 });
 
 // ========== START ==========
