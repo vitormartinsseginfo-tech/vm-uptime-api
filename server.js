@@ -74,25 +74,36 @@ pool.query(`
 }).catch(err => console.error('Erro ao preparar tabela monitor_sites:', err));
 
 // Rota de Login Unificada (Usa a senha do Hunter/Monitor)
-app.post('/api/login', (req, res) => {
-  const { password } = req.body;
-  
-  // PANEL_PASSWORD é a variável que você já tem no Render
-  const MASTER_PASSWORD = process.env.PANEL_PASSWORD || 'admin123';
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  const MASTER_PASSWORD = process.env.PANEL_PASSWORD || 'sua_senha_aqui';
 
+  // 1. Tenta logar pela Senha Mestra (Igual ao Hunter)
   if (password === MASTER_PASSWORD) {
-    // Cria o cookie de sessão (Libera todas as ferramentas)
     res.cookie('vm_uptime_auth', 'true', {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000 // 1 dia
+      maxAge: 24 * 60 * 60 * 1000
     });
-
-    return res.json({ success: true, name: 'Vitor Martins' });
+    return res.json({ success: true, user: { name: 'Admin', email: 'master@vm-security.com' } });
   }
 
-  return res.status(401).json({ error: 'Senha mestra incorreta' });
+  // 2. Se não for a senha mestra, tenta pelo Supabase (Se o email existir)
+  if (email) {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error) {
+      res.cookie('vm_uptime_auth', 'true', {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 24 * 60 * 60 * 1000
+      });
+      return res.json({ success: true, user: { email: data.user.email } });
+    }
+  }
+
+  return res.status(401).json({ error: 'Senha incorreta' });
 });
 
 app.post('/api/logout', (req, res) => {
