@@ -58,7 +58,6 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
-app.use(cors(corsOptions));
 
 // Criar tabela básica usada pelo monitor e garantir coluna response_ms
 pool.query(`
