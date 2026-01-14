@@ -84,14 +84,19 @@ app.use(cookieParser());
 // CORS - ajustar origens conforme necessário
 app.use(cors({
   origin: (origin, cb) => {
+    // Domínios permitidos (adicione outros subdomínios que precisar)
     const allowed = [
       'https://vulnerability.vm-security.com',
       'https://dashboard.vm-security.com',
       'https://vmleakhunter.vm-security.com',
       'https://vm-security.com',
       'https://radar.vm-security.com',
+      'https://24x7.vm-security.com',
+      'https://www.24x7.vm-security.com'
     ];
-    if (!origin || allowed.includes(origin)) return cb(null, true);
+    // Requisições sem origin (curl, server-to-server) são permitidas
+    if (!origin) return cb(null, true);
+    if (allowed.includes(origin)) return cb(null, true);
     return cb(new Error('CORS not allowed'), false);
   },
   credentials: true,
