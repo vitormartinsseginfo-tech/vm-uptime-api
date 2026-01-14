@@ -1,4 +1,4 @@
-// server.js - VM Uptime / Vulnerability unified API (CORS + preflight + logs)
+// server.js - VM Uptime / Vulnerability unified API (CORS + preflight + header-audit)
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -68,8 +68,7 @@ app.use(cookieParser());
 // CORS config: responde apenas para origens permitidas e aceita preflight
 const corsOptions = {
   origin: (origin, callback) => {
-    // allow requests with no origin (like server-to-server, curl, mobile)
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // server-to-server
     if (CORS_WHITELIST.indexOf(origin) !== -1) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   },
@@ -78,9 +77,9 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Service-Token']
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // preflight handler
+app.options('*', cors(corsOptions)); // preflight
 
-// safety: also set headers explicitly (ensures presence even on errors)
+// set explicit headers to ensure preflight passes
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && CORS_WHITELIST.includes(origin)) {
@@ -96,15 +95,15 @@ app.use((req, res, next) => {
 // ========== AUTH MIDDLEWARE ==========
 async function requireAuth(req, res, next) {
   try {
-    // 1) cookie legacy (optional)
+    // cookie legacy
     if (req.cookies && req.cookies.vm_uptime_auth === 'true') return next();
 
-    // 2) legacy static token
+    // static token fallback
     const authHeader = req.headers['authorization'] || '';
     const maybeToken = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
     if (maybeToken === 'vm_access_granted') return next();
 
-    // 3) Firebase token (if initialized)
+    // Firebase token
     if (maybeToken && admin.apps.length > 0) {
       try {
         const decoded = await admin.auth().verifyIdToken(maybeToken);
@@ -123,8 +122,104 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// ========== ROUTAS ==========
+// ========== HELPERS DE AUDIT ==========
+function analyzeHeaders(target, headers) {
+  const vulns = [];
 
+  function push(name, desc, severity) {
+    vulns.push({ name, desc, severity });
+  }
+
+  // HSTS
+  if (!headers['strict-transport-security']) {
+    push('HSTS Ausente', 'O site não está enviando Strict-Transport-Security. Recomendado para forçar HTTPS.', 'HIGH');
+  } else {
+    // opcional: checar max-age
+    try {
+      const hsts = headers['strict-transport-security'];
+      if (!/max-age=\d+/i.test(hsts)) {
+        push('HSTS sem max-age', 'Strict-Transport-Security presente mas sem max-age explícito.', 'MEDIUM');
+      }
+    } catch (e) {}
+  }
+
+  // X-Frame-Options
+  if (!headers['x-frame-options'] && !headers['content-security-policy']) {
+    push('X-Frame-Options ausente', 'Sem proteção contra clickjacking (X-Frame-Options ou CSP frame-ancestors).', 'HIGH');
+  }
+
+  // Content-Security-Policy
+  if (!headers['content-security-policy']) {
+    push('CSP ausente', 'Content-Security-Policy ausente — expõe o site a riscos de XSS', 'HIGH');
+  }
+
+  // X-Content-Type-Options
+  if (!headers['x-content-type-options']) {
+    push('X-Content-Type-Options ausente', 'Sem X-Content-Type-Options: possibile risco de MIME sniffing.', 'LOW');
+  }
+
+  // Referrer-Policy
+  if (!headers['referrer-policy']) {
+    push('Referrer-Policy ausente', 'Sem política de referrer definida.', 'LOW');
+  }
+
+  // Permissions-Policy / Feature-Policy
+  if (!headers['permissions-policy'] && !headers['feature-policy']) {
+    push('Permissions-Policy ausente', 'Sem Permissions-Policy / Feature-Policy.', 'LOW');
+  }
+
+  // HTTP (inseguro)
+  if (target.startsWith('http://')) {
+    push('Uso de HTTP (inseguro)', 'O alvo usa HTTP e não HTTPS — tráfego não criptografado.', 'CRITICAL');
+  }
+
+  // Cookies sem Secure/HttpOnly check (simples)
+  if (headers['set-cookie']) {
+    const cookies = Array.isArray(headers['set-cookie']) ? headers['set-cookie'] : [headers['set-cookie']];
+    cookies.forEach(c => {
+      if (!/HttpOnly/i.test(c) || !/Secure/i.test(c)) {
+        push('Cookie sem HttpOnly/Secure', 'Um cookie foi encontrado sem flags HttpOnly ou Secure.', 'MEDIUM');
+      }
+    });
+  }
+
+  // Exemplo: identificar tecnologia via headers
+  // (detecção heurística simples)
+  return { vulns, heuristics: {} };
+}
+
+function detectServerTech(headers) {
+  const out = { server: 'Não detectado', tech: 'Não detectado' };
+  if (headers['server']) {
+    const s = headers['server'].toLowerCase();
+    if (s.includes('cloudflare')) out.server = 'Cloudflare';
+    else if (s.includes('nginx')) out.server = 'nginx';
+    else if (s.includes('apache')) out.server = 'Apache';
+    else out.server = headers['server'];
+  } else {
+    // heurísticas
+    if (headers['x-amz-id-2'] || headers['x-amz-request-id']) out.server = 'Amazon S3/CloudFront';
+    if (headers['x-nf-request-id']) out.server = 'Netlify';
+    if (headers['x-via'] || headers['via']) out.server = headers['via'];
+  }
+
+  if (headers['x-powered-by']) {
+    out.tech = headers['x-powered-by'];
+  } else if (headers['set-cookie']) {
+    const cookies = Array.isArray(headers['set-cookie']) ? headers['set-cookie'] : [headers['set-cookie']];
+    if (cookies.some(c => c.includes('PHPSESSID'))) out.tech = 'PHP';
+    else if (cookies.some(c => c.toLowerCase().includes('asp.net'))) out.tech = 'ASP.NET';
+  } else {
+    // basic guess
+    if (headers['x-powered-by'] === undefined && out.server.toLowerCase().includes('nginx')) out.tech = 'Possivelmente PHP / Node (via nginx)';
+  }
+  return out;
+}
+
+// scoring weights
+const SCORE_WEIGHTS = { CRITICAL: 40, HIGH: 25, MEDIUM: 15, LOW: 5 };
+
+// ========== ROUTAS ==========
 app.get('/', (req, res) => res.send('VM Uptime / Vulnerability API'));
 
 // Rota de Scan (usada pela ferramenta Vulnerability)
@@ -133,15 +228,48 @@ app.get('/api/scan', requireAuth, async (req, res) => {
   if (!target) return res.status(400).json({ error: 'URL ausente' });
 
   try {
-    const response = await axios.get(target, { timeout: 10000, validateStatus: null });
-    return res.json({ target, status: response.status, headers: response.headers });
+    // fetch target
+    const response = await axios.get(target, { timeout: 10000, validateStatus: null, headers: { 'User-Agent': 'VM-Security-Scanner/1.0' } });
+    const headers = {};
+    // normalize headers to lowercase keys
+    Object.keys(response.headers).forEach(k => headers[k.toLowerCase()] = response.headers[k]);
+
+    // detect server/tech
+    const detected = detectServerTech(headers);
+
+    // analyze headers
+    const { vulns } = analyzeHeaders(target, headers);
+
+    // map vulnerabilities to expected format (name, desc, severity)
+    const mapped = vulns.map(v => ({
+      name: v.name,
+      desc: v.desc,
+      severity: (v.severity || 'LOW').toString().toUpperCase()
+    }));
+
+    // calculate score
+    let penalty = 0;
+    mapped.forEach(v => {
+      const w = SCORE_WEIGHTS[v.severity] || 5;
+      penalty += w;
+    });
+    const score = Math.max(0, 100 - penalty);
+
+    return res.json({
+      target,
+      status: response.status,
+      detected_server: detected.server,
+      detected_tech: detected.tech,
+      vulnerabilities: mapped,
+      score
+    });
   } catch (err) {
-    console.error('Scan error for', target, err.message);
-    return res.status(500).json({ error: 'Erro ao escanear', detail: err.message });
+    console.error('Scan error for', target, err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Erro ao escanear', detail: err && err.message ? err.message : '' });
   }
 });
 
-// 24x7: listar sites
+// 24x7 endpoints (unchanged logic)
 app.get('/api/sites', requireAuth, async (req, res) => {
   if (!pool) return res.json([]);
   try {
@@ -153,7 +281,6 @@ app.get('/api/sites', requireAuth, async (req, res) => {
   }
 });
 
-// adicionar site
 app.post('/api/sites', requireAuth, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'DB not configured' });
   const { url } = req.body || {};
@@ -168,7 +295,6 @@ app.post('/api/sites', requireAuth, async (req, res) => {
   }
 });
 
-// deletar site
 app.delete('/api/sites/:id', requireAuth, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'DB not configured' });
   try {
@@ -180,7 +306,6 @@ app.delete('/api/sites/:id', requireAuth, async (req, res) => {
   }
 });
 
-// forçar check-now
 app.post('/api/check-now', requireAuth, async (req, res) => {
   if (!pool) return res.json({ success: true, note: 'DB not configured' });
   try {
