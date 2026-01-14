@@ -444,20 +444,18 @@ app.get('/api/auth-test', async (req, res) => {
     res.json({ status: "Conectado ao Supabase com sucesso!" });
 });
 
-// Rota de Login Unificada (Substitua a linha 438 até 470 por isso)
+// -------------------- Rota de Login Unificada --------------------
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
   
-  // Lista de usuários permitidos (Você pode adicionar mais aqui)
+  // Lista de usuários (Adicione ou mude as senhas aqui)
   const usuarios = [
-    { email: 'vitor.martins@vm-security.com', senha: 'SUA_SENHA_AQUI', nome: 'Vitor Martins' },
-    { email: 'funcionario@vm-security.com', senha: 'SENHA_DELE', nome: 'Nome do Funcionario' }
+    { email: 'vitor.martins@vm-security.com', senha: 'SUA_SENHA_AQUI', nome: 'Vitor Martins' }
   ];
 
   const usuarioEncontrado = usuarios.find(u => u.email === email && u.senha === password);
 
   if (usuarioEncontrado) {
-    // Cria o cookie de acesso (Igual ao que o Monitor já usa)
     res.cookie('vm_uptime_auth', 'true', {
       httpOnly: true,
       secure: true,
@@ -474,16 +472,12 @@ app.post('/api/login', (req, res) => {
   return res.status(401).json({ error: 'E-mail ou senha incorretos' });
 });
 
-    // 3. Retorna os dados para o Frontend
-    res.json({ 
-        token: session.access_token, 
-        user: {
-            id: user.id,
-            email: user.email,
-            name: profileRes.data ? profileRes.data.full_name : 'Usuário',
-            role: profileRes.data ? profileRes.data.role : 'funcionario'
-        }
-    });
+// Rota para verificar se está logado (usada pelo Dashboard)
+app.get('/api/auth/check', (req, res) => {
+  if (req.cookies && req.cookies.vm_uptime_auth === 'true') {
+    return res.json({ authenticated: true });
+  }
+  return res.status(401).json({ authenticated: false });
 });
 
 // -------------------- Start server --------------------
