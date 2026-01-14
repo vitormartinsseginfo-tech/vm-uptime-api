@@ -96,9 +96,10 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// Mude a função requireAuth para isso:
 function requireAuth(req, res, next) {
-  if (req.cookies && req.cookies.vm_uptime_auth === 'true') return next();
-  return res.status(401).json({ error: 'Acesso negado. Faça login.' });
+  // Comentamos a trava e deixamos passar direto
+  return next(); 
 }
 
 // -------------------- Monitor (Uptime) --------------------
