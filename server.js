@@ -99,6 +99,22 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization']
 }));
 
+// service token shortcut (server-to-server)
+const SERVICE_TOKEN = process.env.SERVICE_TOKEN || null;
+
+async function requireAuth(req, res, next) {
+  try {
+    // 0) Token de serviço (para Workers / crons)
+    const svc = req.headers['x-service-token'] || req.headers['x-vm-service-token'];
+    if (svc && SERVICE_TOKEN && svc === SERVICE_TOKEN) {
+      // opcional: set some context like req.isService = true;
+      return next();
+    }
+
+    // ... existing checks (cookie, legacy, firebase) ...
+  } catch (err) { /* ... */ }
+}
+
 // ========== AUTH MIDDLEWARE (Híbrido: Cookie || Legacy token || Firebase Token) ==========
 async function requireAuth(req, res, next) {
   try {
