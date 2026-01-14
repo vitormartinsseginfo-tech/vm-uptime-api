@@ -1,4 +1,4 @@
-// server.js - VM Security Unified API (compatível /api/sites + CORS 24x7)
+// server.js - VM Security Unified API (completo, compatível com 24x7.vm-security.com)
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -23,6 +23,7 @@ const SERVICE_TOKEN = process.env.SERVICE_TOKEN || null;
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
   supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  console.log('Supabase client initialized.');
 }
 
 // ========== DATABASE (pg Pool) ==========
@@ -32,27 +33,48 @@ if (DATABASE_URL) {
     connectionString: DATABASE_URL,
     ssl: { rejectUnauthorized: false }
   });
+  console.log('Postgres pool created.');
 } else {
   console.warn('WARNING: DATABASE_URL not set. Monitor routes will fail without a DB.');
 }
 
-// Ensure monitored_domains table exists (if DB configured)
-// This table matches the frontend expectations: id, url, status, response_ms, last_check
+// Ensure monitored_domains table exists (and sync url/domain)
 async function ensureTables() {
   if (!pool) return;
   try {
+    // Create table with both url and domain to handle migrations
     await pool.query(`
       CREATE TABLE IF NOT EXISTS monitored_domains (
         id SERIAL PRIMARY KEY,
-        url TEXT NOT NULL,
+        url TEXT,
+        domain TEXT,
         status TEXT DEFAULT 'unknown',
         response_ms INTEGER DEFAULT 0,
         last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log('DB: monitored_domains OK');
+    console.log('DB: monitored_domains table ensured.');
+
+    // Check columns and migrate if needed
+    const colsRes = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'monitored_domains';
+    `);
+    const cols = colsRes.rows.map(r => r.column_name);
+    const hasUrl = cols.includes('url');
+    const hasDomain = cols.includes('domain');
+
+    if (!hasUrl && hasDomain) {
+      await pool.query('ALTER TABLE monitored_domains ADD COLUMN url TEXT;');
+      await pool.query('UPDATE monitored_domains SET url = domain WHERE url IS NULL;');
+      console.log('DB: migrated domain -> url (added url column and copied values).');
+    } else if (hasUrl && hasDomain) {
+      await pool.query('UPDATE monitored_domains SET url = domain WHERE url IS NULL AND domain IS NOT NULL;');
+      console.log('DB: synchronized url with domain where needed.');
+    }
+
   } catch (err) {
-    console.error('Error creating tables:', err);
+    console.error('Error ensuring/migrating tables:', err);
   }
 }
 ensureTables().catch(console.error);
@@ -96,7 +118,8 @@ app.use(cors({
       'https://24x7.vm-security.com',
       'https://www.24x7.vm-security.com'
     ];
-    if (!origin) return cb(null, true); // server-to-server or curl
+    // Allow server-to-server requests (no origin)
+    if (!origin) return cb(null, true);
     if (allowed.includes(origin)) return cb(null, true);
     return cb(new Error('CORS not allowed'), false);
   },
@@ -107,10 +130,10 @@ app.use(cors({
   optionsSuccessStatus: 204
 }));
 
-// ========== AUTH MIDDLEWARE (Híbrido: Cookie || Legacy token || Firebase Token || Service Token) ==========
+// ========== AUTH MIDDLEWARE (Híbrido) ==========
 async function requireAuth(req, res, next) {
   try {
-    // 0) Token de serviço (para Workers / crons)
+    // 0) Service token (server-to-server, workers, crons)
     const svc = req.headers['x-service-token'] || req.headers['x-vm-service-token'];
     if (svc && SERVICE_TOKEN && svc === SERVICE_TOKEN) {
       return next();
@@ -147,7 +170,13 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// ========== ROTA DE LOGIN ==========
+// ========== ROUTES ==========
+
+// Health / root
+app.get('/', (req, res) => res.send('VM Uptime API OK'));
+app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+
+// ========== AUTH (login/logout) ==========
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -169,7 +198,6 @@ app.post('/api/login', async (req, res) => {
         sameSite: 'none',
         maxAge: 24 * 60 * 60 * 1000
       });
-
       return res.json({ success: true, token: 'vm_access_granted', user: { email: email || 'admin@vm-security.com' } });
     }
 
@@ -180,20 +208,18 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ========== ROTA DE LOGOUT ==========
 app.post('/api/logout', (req, res) => {
   res.clearCookie('vm_uptime_auth', { httpOnly: true, secure: true, sameSite: 'none' });
   return res.json({ success: true });
 });
 
-// ========== ROTA DE DEHASHED / BUSCA (exemplo) ==========
+// ========== DEHASHED (placeholder) ==========
 app.get('/api/dehashed/search', requireAuth, async (req, res) => {
+  // placeholder to keep frontend compatibility
   res.json({ total: 0, entries: [], user: req.user || null });
 });
 
-// ========== ROTAS DE MONITORAMENTO (compatíveis) ==========
-
-// Legacy route (mantida)
+// ========== MONITOR / SITES (compatibilidade com frontend) ==========
 app.get('/api/monitor/domains', requireAuth, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
   try {
@@ -205,18 +231,19 @@ app.get('/api/monitor/domains', requireAuth, async (req, res) => {
   }
 });
 
-// Compatibility: frontend uses /api/sites
+// /api/sites (frontend expects this)
 app.get('/api/sites', requireAuth, async (req, res) => {
-  if (!pool) return res.json([]); // if no DB, return empty list (frontend handles it)
+  if (!pool) return res.json([]);
   try {
-    const result = await pool.query('SELECT id, url, status, response_ms, last_check FROM monitored_domains ORDER BY id DESC');
-    res.json(result.rows.map(r => ({
+    const result = await pool.query('SELECT * FROM monitored_domains ORDER BY id DESC');
+    const sites = result.rows.map(r => ({
       id: r.id,
-      url: r.url,
-      status: r.status,
-      response_ms: r.response_ms,
+      url: r.url || r.domain || '',
+      status: r.status || 'unknown',
+      response_ms: r.response_ms || 0,
       last_check: r.last_check
-    })));
+    }));
+    res.json(sites);
   } catch (err) {
     console.error('/api/sites error', err);
     res.status(500).json({ error: 'Erro ao buscar sites' });
@@ -224,14 +251,16 @@ app.get('/api/sites', requireAuth, async (req, res) => {
 });
 
 app.post('/api/sites', requireAuth, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
+  if (!pool) return res.status(500).json({ error: 'DB não configurado' });
   const { url } = req.body || {};
   if (!url) return res.status(400).json({ error: 'url required' });
   try {
-    // Normalize basic URL
     let u = url.trim();
     if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
-    const insert = await pool.query('INSERT INTO monitored_domains(url) VALUES($1) RETURNING id, url, status, response_ms, last_check', [u]);
+    const insert = await pool.query(
+      'INSERT INTO monitored_domains (url, domain, status) VALUES ($1, $1, $2) RETURNING id, url, status, response_ms, last_check',
+      [u, 'unknown']
+    );
     res.json({ success: true, site: insert.rows[0] });
   } catch (err) {
     console.error('monitor insert error', err);
@@ -240,7 +269,7 @@ app.post('/api/sites', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/sites/:id', requireAuth, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
+  if (!pool) return res.status(500).json({ error: 'DB não configurado' });
   try {
     await pool.query('DELETE FROM monitored_domains WHERE id = $1', [req.params.id]);
     res.json({ success: true });
@@ -250,7 +279,7 @@ app.delete('/api/sites/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Endpoint to trigger an immediate check for all monitored sites
+// Endpoint to trigger immediate checks
 app.post('/api/check-now', requireAuth, async (req, res) => {
   if (!pool) return res.json({ success: true, note: 'No DB configured, nothing to check' });
 
@@ -258,7 +287,6 @@ app.post('/api/check-now', requireAuth, async (req, res) => {
     const result = await pool.query('SELECT id, url FROM monitored_domains ORDER BY id ASC');
     const rows = result.rows;
 
-    // sequential checks to avoid bursts
     for (const r of rows) {
       const url = r.url;
       let status = 'offline';
@@ -290,8 +318,7 @@ app.post('/api/check-now', requireAuth, async (req, res) => {
   }
 });
 
-// ===== ROTA DE SCAN DE VULNERABILIDADES =====
-// GET /api/scan?url=<URL>
+// ========== SCAN (headers quick scan) ==========
 app.get('/api/scan', requireAuth, async (req, res) => {
   const raw = req.query.url;
   console.log('[SCAN] request received for url:', raw);
