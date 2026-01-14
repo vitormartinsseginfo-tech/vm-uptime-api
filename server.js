@@ -17,7 +17,18 @@ const { Pool } = require('pg');
 const cookieParser = require('cookie-parser');
 
 const app = express();
+
+// 1. Libera a conversa entre o site e a API (CORS)
+app.use(cors({
+    origin: true,
+    credentials: true
+}));
+
+// 2. Ensina o servidor a ler o que você digita no login (JSON)
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// 3. Mantém o suporte a cookies para o Monitor
 app.use(cookieParser());
 
 const PORT = process.env.PORT || 3000;
