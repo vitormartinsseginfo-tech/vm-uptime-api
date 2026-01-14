@@ -444,30 +444,35 @@ app.get('/api/auth-test', async (req, res) => {
     res.json({ status: "Conectado ao Supabase com sucesso!" });
 });
 
-// Rota para Login
-app.post('/api/login', async (req, res) => {
-    const { email, password } = req.body;
-  console.log("DEBUG LOGIN:", email, password ? "Senha recebida" : "Senha VAZIA");
-    
-    // 1. Autentica o usuário no Supabase Auth
-    const authRes = await supabase.auth.signInWithPassword({
-        email,
-        password,
+// Rota de Login Unificada (Substitua a linha 438 até 470 por isso)
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  // Lista de usuários permitidos (Você pode adicionar mais aqui)
+  const usuarios = [
+    { email: 'vitor.martins@vm-security.com', senha: 'SUA_SENHA_AQUI', nome: 'Vitor Martins' },
+    { email: 'funcionario@vm-security.com', senha: 'SENHA_DELE', nome: 'Nome do Funcionario' }
+  ];
+
+  const usuarioEncontrado = usuarios.find(u => u.email === email && u.senha === password);
+
+  if (usuarioEncontrado) {
+    // Cria o cookie de acesso (Igual ao que o Monitor já usa)
+    res.cookie('vm_uptime_auth', 'true', {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000 // 1 dia
     });
 
-    if (authRes.error) {
-        return res.status(401).json({ error: "E-mail ou senha incorretos" });
-    }
+    return res.json({ 
+      success: true, 
+      user: { name: usuarioEncontrado.nome, email: usuarioEncontrado.email } 
+    });
+  }
 
-    const user = authRes.data.user;
-    const session = authRes.data.session;
-
-    // 2. Busca o nome na tabela profiles de forma simples
-    const profileRes = await supabase
-        .from('profiles')
-        .select('full_name, role')
-        .eq('id', user.id)
-        .single();
+  return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+});
 
     // 3. Retorna os dados para o Frontend
     res.json({ 
