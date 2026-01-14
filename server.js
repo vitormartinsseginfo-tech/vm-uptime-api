@@ -18,7 +18,6 @@ const cookieParser = require('cookie-parser');
 
 const app = express();
 app.use(express.json());
-app.use(cors()); // ADICIONE ESTA LINHA AQUI
 app.use(cookieParser());
 
 const PORT = process.env.PORT || 3000;
@@ -43,8 +42,10 @@ const pool = new Pool({
 
 // CORS: permitir credenciais (cookies). Para produção defina FRONTEND_URL com a URL do seu frontend (ex: https://radar.vm-security.com)
 const corsOptions = {
-  origin: FRONTEND_URL === true ? true : FRONTEND_URL,
-  credentials: true
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 app.use(cors(corsOptions));
 
