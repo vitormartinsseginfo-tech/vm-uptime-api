@@ -57,7 +57,6 @@ ensureTables().catch(console.error);
 // ========== FIREBASE ADMIN INIT (OPTIONAL) ==========
 if (FIREBASE_SERVICE_ACCOUNT) {
   try {
-    // FIREBASE_SERVICE_ACCOUNT should be the full JSON (string). Example: process.env.FIREBASE_SERVICE_ACCOUNT = JSON.stringify(serviceAccount)
     const serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
@@ -68,7 +67,6 @@ if (FIREBASE_SERVICE_ACCOUNT) {
     console.error('Erro ao inicializar Firebase Admin com FIREBASE_SERVICE_ACCOUNT:', err);
   }
 } else if (FIREBASE_PROJECT_ID) {
-  // Fallback: Initialize with projectId only (may work in some envs with Google default credentials)
   try {
     admin.initializeApp({ projectId: FIREBASE_PROJECT_ID });
     console.log('Firebase Admin inicializado com projectId (sem chave explícita).');
@@ -92,7 +90,6 @@ app.use(cors({
       'https://vmleakhunter.vm-security.com',
       'https://vm-security.com',
       'https://radar.vm-security.com',
-      // adicione outras origens necessárias
     ];
     if (!origin || allowed.includes(origin)) return cb(null, true);
     return cb(new Error('CORS not allowed'), false);
@@ -105,7 +102,6 @@ app.use(cors({
 // ========== AUTH MIDDLEWARE (Híbrido: Cookie || Legacy token || Firebase Token) ==========
 async function requireAuth(req, res, next) {
   try {
-    // 1) Cookie-based session (legacy)
     if (req.cookies && req.cookies.vm_uptime_auth === 'true') {
       return next();
     }
@@ -113,16 +109,13 @@ async function requireAuth(req, res, next) {
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
-    // 2) Legacy static token for compatibility (`vm_access_granted`)
     if (token === 'vm_access_granted') {
       return next();
     }
 
-    // 3) Firebase token (if admin initialized)
     if (token && admin.apps && admin.apps.length > 0) {
       try {
         const decoded = await admin.auth().verifyIdToken(token);
-        // opcionalmente, você pode checar decoded.aud / decoded.iss / decoded.email_verified etc.
         req.user = decoded;
         return next();
       } catch (err) {
@@ -131,7 +124,6 @@ async function requireAuth(req, res, next) {
       }
     }
 
-    // 4) Se chegou aqui, negar
     return res.status(401).json({ error: 'Não autorizado. Forneça credenciais válidas.' });
   } catch (err) {
     console.error('Erro no requireAuth:', err);
@@ -139,7 +131,7 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// ========== ROTA DE LOGIN (Mantemos master password + Supabase) ==========
+// ========== ROTA DE LOGIN ==========
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -147,18 +139,14 @@ app.post('/api/login', async (req, res) => {
 
     let authenticated = false;
 
-    // 1) Senha Mestra (legacy)
     if (password && password === MASTER_PASSWORD) {
       authenticated = true;
-    } 
-    // 2) Supabase auth (opcional)
-    else if (email && password && supabase) {
+    } else if (email && password && supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (!error && data?.user) authenticated = true;
     }
 
     if (authenticated) {
-      // Define cookie (para clientes que usam sessão/cookie)
       res.cookie('vm_uptime_auth', 'true', {
         httpOnly: true,
         secure: true,
@@ -166,7 +154,6 @@ app.post('/api/login', async (req, res) => {
         maxAge: 24 * 60 * 60 * 1000
       });
 
-      // Retorna token também (legacy token para compatibilidade)
       return res.json({ success: true, token: 'vm_access_granted', user: { email: email || 'admin@vm-security.com' } });
     }
 
@@ -183,55 +170,14 @@ app.post('/api/logout', (req, res) => {
   return res.json({ success: true });
 });
 
-// ========== ROTA DE SCAN (Protegida) ==========
-app.get('/api/scan', requireAuth, async (req, res) => {
-  const target = req.query.url;
-  if (!target) return res.status(400).json({ error: 'URL obrigatória' });
-
-  const url = target.startsWith('http') ? target : `https://${target}`;
-  const results = { target: url, score: 100, vulnerabilities: [], tech: {} };
-
-  try {
-    const response = await axios.get(url, { timeout: 8000, validateStatus: false, headers: { 'User-Agent': 'VM-Scanner/1.0' } });
-    results.tech.server = response.headers['server'] || 'Não identificado';
-    results.tech.poweredBy = response.headers['x-powered-by'] || 'Não identificado';
-
-    // Testes simples
-    const tests = [
-      { path: '/.env', name: 'Arquivo .env exposto', sev: 'CRITICAL' },
-      { path: '/.git/config', name: 'Repositório Git exposto', sev: 'CRITICAL' },
-      { path: '/wp-config.php.bak', name: 'Backup de config exposto', sev: 'HIGH' }
-    ];
-
-    for (const t of tests) {
-      try {
-        const c = await axios.get(`${url}${t.path}`, { timeout: 2000, validateStatus: false });
-        if (c.status === 200) {
-          results.vulnerabilities.push({ name: t.name, severity: t.sev, desc: `O arquivo ${t.path} foi encontrado publicamente.` });
-          results.score -= 30;
-        }
-      } catch (e) { /* ignore file check errors */ }
-    }
-
-    if (!response.headers['x-frame-options']) {
-      results.vulnerabilities.push({ name: 'Falta de X-Frame-Options', severity: 'LOW', desc: 'Risco de Clickjacking.' });
-      results.score -= 5;
-    }
-
-    results.score = Math.max(0, results.score);
-    res.json(results);
-  } catch (err) {
-    console.error('scan error', err.message || err);
-    res.status(500).json({ error: 'Erro ao acessar site: ' + (err.message || 'unknown') });
-  }
+// ========== ROTA DE DEHASHED / BUSCA ==========
+app.get('/api/dehashed/search', requireAuth, async (req, res) => {
+  // Aqui você pode implementar integração real com DeHashed ou outra API
+  // Por enquanto, retorna vazio para não quebrar frontend
+  res.json({ total: 0, entries: [], user: req.user || null });
 });
 
-// Rota de verificação simples
-app.get('/api/auth/check', requireAuth, (req, res) => {
-  res.json({ authenticated: true, user: req.user || null });
-});
-
-// ========== ROTAS DO MONITORAMENTO ==========
+// ========== ROTAS DE MONITORAMENTO ==========
 app.get('/api/monitor/domains', requireAuth, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Banco de dados não configurado' });
   try {
@@ -265,11 +211,6 @@ app.delete('/api/monitor/domains/:id', requireAuth, async (req, res) => {
     console.error('monitor delete error', err);
     res.status(500).json({ error: 'Erro ao deletar' });
   }
-});
-
-// ========== PLACEHOLDER: DeHashed / Busca ==========
-app.get('/api/dehashed/search', requireAuth, async (req, res) => {
-  res.json({ total: 0, entries: [], user: req.user || null });
 });
 
 // ========== START ==========
