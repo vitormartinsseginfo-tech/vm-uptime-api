@@ -450,7 +450,7 @@ app.post('/api/login', (req, res) => {
   
   // Lista de usuários (Adicione ou mude as senhas aqui)
   const usuarios = [
-    { email: 'vitor.martins@vm-security.com', senha: 'SUA_SENHA_AQUI', nome: 'Vitor Martins' }
+    { email: 'vitor.martins@vm-security.com', senha: 'vm123456', nome: 'Vitor Martins' }
   ];
 
   const usuarioEncontrado = usuarios.find(u => u.email === email && u.senha === password);
