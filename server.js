@@ -420,6 +420,18 @@ app.get('/api/scan', async (req, res) => {
     }
 });
 
+const { createClient } = require('@supabase/supabase-js');
+
+// Conexão com o Banco de Dados Supabase
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Rota de teste para verificar se o banco está conectado
+app.get('/api/auth-test', async (req, res) => {
+    res.json({ status: "Conectado ao Supabase com sucesso!" });
+});
+
 // -------------------- Start server --------------------
 app.listen(PORT, () => {
   console.log(`VM Security API rodando na porta ${PORT}`);
