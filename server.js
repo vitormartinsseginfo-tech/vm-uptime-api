@@ -436,27 +436,34 @@ app.get('/api/auth-test', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     
-    const { data, error } = await supabase.auth.signInWithPassword({
+    // 1. Autentica o usuário no Supabase Auth
+    const authRes = await supabase.auth.signInWithPassword({
         email,
         password,
     });
 
-    if (error) return res.status(401).json({ error: error.message });
+    if (authRes.error) {
+        return res.status(401).json({ error: "E-mail ou senha incorretos" });
+    }
 
-    // Busca o nome do usuário na tabela profiles
-    const { data: profile } = await supabase
+    const user = authRes.data.user;
+    const session = authRes.data.session;
+
+    // 2. Busca o nome na tabela profiles de forma simples
+    const profileRes = await supabase
         .from('profiles')
         .select('full_name, role')
-        .eq('id', data.user.id)
+        .eq('id', user.id)
         .single();
 
+    // 3. Retorna os dados para o Frontend
     res.json({ 
-        token: data.session.access_token, 
+        token: session.access_token, 
         user: {
-            id: data.user.id,
-            email: data.user.email,
-            name: profile ? profile.full_name : 'Usuário',
-            role: profile ? profile.role : 'funcionario'
+            id: user.id,
+            email: user.email,
+            name: profileRes.data ? profileRes.data.full_name : 'Usuário',
+            role: profileRes.data ? profileRes.data.role : 'funcionario'
         }
     });
 });
