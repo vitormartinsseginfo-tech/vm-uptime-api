@@ -1,4 +1,4 @@
-// server.js - SUPER SERVIDOR UNIFICADO VM SECURITY - v8 (Final Turbo)
+// server.js - SUPER SERVIDOR UNIFICADO VM SECURITY - v9 (FULL FIX)
 const express = require('express');
 const axios = require('axios');
 const https = require('https');
@@ -16,7 +16,7 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const MONITOR_INTERVAL = parseInt(process.env.MONITOR_INTERVAL || '600000');
 const MASTER_KEY = process.env.MASTER_KEY || null;
 
-// ---------- CORS DEFINITIVO ----------
+// ---------- CORS DEFINITIVO (Reflexivo) ----------
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
@@ -31,7 +31,7 @@ app.use((req, res, next) => {
 let DB = { sites: [], leakMonitor: { domains: [] } };
 function loadData() {
     if (fs.existsSync(DATA_FILE)) {
-        try { DB = JSON.parse(fs.readFileSync(DATA_FILE)); } catch (e) {}
+        try { DB = JSON.parse(fs.readFileSync(DATA_FILE)); } catch (e) { console.error("Erro ao ler DB"); }
     }
 }
 function saveData() { fs.writeFileSync(DATA_FILE, JSON.stringify(DB, null, 2)); }
@@ -54,6 +54,16 @@ async function requireAuth(req, res, next) {
 // ---------- ROTEADOR INTELIGENTE ----------
 const router = express.Router();
 
+// ROTA DE STATUS (Para você não ver mais o erro de Rota não encontrada)
+router.get('/', (req, res) => {
+    res.json({ 
+        status: "online", 
+        message: "VM Security API Unificada",
+        tools: ["Hunter", "24x7", "Vulnerability", "LeakHunter"],
+        database: { sites: DB.sites.length, leakDomains: DB.leakMonitor.domains.length }
+    });
+});
+
 // --- FERRAMENTA: HUNTER ---
 router.all('/hunt', requireAuth, async (req, res) => {
     const target = req.query.url || (req.body && req.body.url);
@@ -74,7 +84,7 @@ router.all('/hunt', requireAuth, async (req, res) => {
 });
 
 // --- FERRAMENTA: VULNERABILITY ---
-router.all(['/analyze', '/scan', '/api/scan'], requireAuth, async (req, res) => {
+const analyzeHandler = async (req, res) => {
     const target = req.query.url || (req.body && req.body.url);
     if (!target) return res.status(400).json({ error: 'URL missing' });
     try {
@@ -82,15 +92,10 @@ router.all(['/analyze', '/scan', '/api/scan'], requireAuth, async (req, res) => 
         const url = target.startsWith('http') ? target : 'http://' + target;
         const resp = await client.get(url, { headers: { 'User-Agent': ua }, validateStatus: () => true });
         const h = resp.headers || {};
-        
-        // Detecção de tecnologia por headers comuns
-        const server = h['server'] || h['via'] || 'Não detectado';
-        const tech = h['x-powered-by'] || h['x-generator'] || (h['set-cookie'] && h['set-cookie'].some(c => c.includes('PHPSESSID')) ? 'PHP' : 'Não detectada');
-
         res.json({
             status: resp.status,
-            server: server,
-            technology: tech,
+            server: h['server'] || 'Não detectado',
+            technology: h['x-powered-by'] || 'Não detectada',
             securityHeaders: {
                 'x-frame-options': h['x-frame-options'] || 'MISSING',
                 'strict-transport-security': h['strict-transport-security'] || 'MISSING',
@@ -99,7 +104,10 @@ router.all(['/analyze', '/scan', '/api/scan'], requireAuth, async (req, res) => 
             }
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+};
+router.all('/analyze', requireAuth, analyzeHandler);
+router.all('/scan', requireAuth, analyzeHandler);
+router.all('/api/scan', requireAuth, analyzeHandler);
 
 // --- FERRAMENTA: 24x7 (UPTIME) ---
 router.get('/sites', requireAuth, (req, res) => res.json(DB.sites));
@@ -121,7 +129,7 @@ router.all('/check-now', requireAuth, async (req, res) => {
             const url = s.url.startsWith('http') ? s.url : 'http://' + s.url;
             const r = await client.get(url, { headers: { 'User-Agent': ua }, validateStatus: () => true });
             s.lastCheck = { at: new Date().toISOString(), up: r.status < 400, status: r.status };
-        } catch (e) { s.lastCheck = { at: new Date().toISOString(), up: false, error: e.message }; }
+        } catch (e) { s.lastCheck = { at: new Date().toISOString(), up: false }; }
     }
     saveData();
     res.json({ ok: true });
@@ -141,9 +149,11 @@ router.delete('/monitor/domains/:id', requireAuth, (req, res) => {
     res.json({ ok: true });
 });
 
+// APLICA O ROTEADOR
 app.use('/api', router);
 app.use('/', router);
 
-app.use((req, res) => res.status(404).json({ error: "Rota não encontrada" }));
+// RESPOSTA PADRÃO JSON
+app.use((req, res) => res.status(404).json({ error: "Rota não encontrada", path: req.url }));
 
 app.listen(PORT, () => console.log(`🚀 Servidor Unificado na porta ${PORT}`));
