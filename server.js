@@ -126,5 +126,56 @@ app.all(['/check-now', '/api/check-now'], async (req, res) => {
     res.json({ ok: true });
 });
 
+// --- NOVA FERRAMENTA: PORT SCANNER ---
+const net = require('net');
+
+app.get('/api/scan', async (req, res) => {
+    const target = req.query.target;
+    if (!target) return res.status(400).json({ error: 'Alvo ausente' });
+
+    // Lista de portas para testar
+    const ports = [
+        { port: 21, service: 'FTP' },
+        { port: 22, service: 'SSH' },
+        { port: 80, service: 'HTTP' },
+        { port: 443, service: 'HTTPS' },
+        { port: 3306, service: 'MySQL' },
+        { port: 3389, service: 'RDP' },
+        { port: 5432, service: 'PostgreSQL' },
+        { port: 8080, service: 'HTTP-Proxy' }
+    ];
+
+    // Função que testa a porta TCP real
+    const checkPort = (port, host) => {
+        return new Promise((resolve) => {
+            const socket = new net.Socket();
+            const timeout = 2000; // 2 segundos
+
+            socket.setTimeout(timeout);
+            socket.on('connect', () => {
+                socket.destroy();
+                resolve('Aberta');
+            });
+            socket.on('timeout', () => {
+                socket.destroy();
+                resolve('Fechada/Filtrada');
+            });
+            socket.on('error', () => {
+                socket.destroy();
+                resolve('Fechada');
+            });
+            socket.connect(port, host);
+        });
+    };
+
+    const results = [];
+    for (const p of ports) {
+        const status = await checkPort(p.port, target);
+        results.push({ ...p, status });
+    }
+
+    res.json({ target, results });
+});
+
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
