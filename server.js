@@ -108,15 +108,19 @@ app.delete(['/sites/:id', '/api/sites/:id'], (req, res) => {
 });
 
 app.all(['/check-now', '/api/check-now'], async (req, res) => {
-    const ua = new UserAgent({ deviceCategory: 'desktop' }).toString();
+    const WORKER_URL = 'https://monitor24x7.vm-security.workers.dev'; // URL do seu worker
+
     for (const s of DB.sites) {
         try {
-            const start = Date.now();
-            const r = await client.get(s.url, { headers: { 'User-Agent': ua }, validateStatus: () => true });
-            s.status = r.status < 400 ? 'online' : 'offline';
-            s.response_ms = Date.now() - start;
+            // O Render pede para o Worker testar o site
+            const resp = await axios.get(`${WORKER_URL}?url=${encodeURIComponent(s.url)}`);
+            s.status = resp.data.status;
+            s.response_ms = resp.data.ms;
             s.last_check = new Date().toISOString();
-        } catch (e) { s.status = 'offline'; }
+        } catch (e) {
+            s.status = 'offline';
+            s.response_ms = 0;
+        }
     }
     saveData();
     res.json({ ok: true });
