@@ -128,7 +128,6 @@ app.all(['/check-now', '/api/check-now'], async (req, res) => {
 });
 
 // --- NOVA FERRAMENTA: PORT SCANNER ---
-const net = require('net');
 
 app.get('/api/scan', async (req, res) => {
     const target = req.query.target;
