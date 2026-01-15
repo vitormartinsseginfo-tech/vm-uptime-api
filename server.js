@@ -198,5 +198,100 @@ app.get('/api/portcheck', async (req, res) => {
     }
 });
 
+// === ROTA: /api/dehashed/search (integração DeHashed, com verificação Firebase + cache) ===
+const admin = require('firebase-admin');
+
+// Inicializa Firebase Admin se a chave de serviço estiver nas env vars (Render)
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(sa)
+    });
+    console.log('Firebase Admin init ok');
+  } catch (err) {
+    console.warn('Erro ao inicializar Firebase Admin:', err.message);
+  }
+} else {
+  console.warn('FIREBASE_SERVICE_ACCOUNT não configurado (Firebase Admin não inicializado)');
+}
+
+// middleware para validar token Firebase (expect: Authorization: Bearer <idToken>)
+async function verifyFirebaseToken(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) return res.status(401).json({ error: 'NO_TOKEN' });
+  const idToken = auth.split(' ')[1];
+
+  if (!admin.apps.length) return res.status(500).json({ error: 'FIREBASE_NOT_CONFIGURED' });
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.user = decoded;
+    return next();
+  } catch (err) {
+    console.warn('verifyIdToken failed', err.message);
+    return res.status(401).json({ error: 'INVALID_TOKEN' });
+  }
+}
+
+// cache simples em memória (map: key -> { ts, data })
+const dehashedCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
+
+app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
+  const query = (req.query.query || req.query.q || '').trim();
+  const type = (req.query.type || 'all').trim();
+
+  if (!query) return res.status(400).json({ error: 'query_missing', message: 'Use ?query=email@exemplo.com' });
+
+  // env vars do Dehashed (adicionar no Render)
+  const deEmail = process.env.DEHASHED_EMAIL;
+  const deKey = process.env.DEHASHED_API_KEY;
+
+  if (!deEmail || !deKey) {
+    return res.status(503).json({
+      error: 'DEHASHED_NOT_CONFIGURED',
+      message: 'Adicione DEHASHED_EMAIL e DEHASHED_API_KEY nas Environment Variables do Render e redeploy.'
+    });
+  }
+
+  // cache key pode usar também type se você segmentar por type
+  const cacheKey = `dehashed:${type}:${query.toLowerCase()}`;
+  const cached = dehashedCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const auth = Buffer.from(`${deEmail}:${deKey}`).toString('base64');
+    // endpoint "light" é rápido; ajusta se preferir outro endpoint
+    const url = `https://api.dehashed.com/light?query=${encodeURIComponent(query)}`;
+
+    const resp = await axios.get(url, {
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Basic ${auth}`
+      },
+      timeout: 15000
+    });
+
+    // Normalize a resposta para { total, entries: [] } — seu frontend já espera entries/total
+    const entries = resp.data?.entries || resp.data?.records || (Array.isArray(resp.data) ? resp.data : []);
+    const total = resp.data?.total || entries.length || 0;
+
+    const out = { total, entries };
+    dehashedCache.set(cacheKey, { ts: Date.now(), data: out });
+
+    return res.json(out);
+  } catch (err) {
+    console.error('Dehashed API error', err.response ? err.response.data : err.message);
+    const status = err.response?.status || 500;
+    return res.status(status).json({
+      error: 'DEHASHED_ERROR',
+      details: err.response?.data || err.message
+    });
+  }
+});
+
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
