@@ -3,6 +3,7 @@ const axios = require('axios');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const UserAgent = require('user-agents');
 
 const app = express();
@@ -131,9 +132,14 @@ const net = require('net');
 
 app.get('/api/scan', async (req, res) => {
     const target = req.query.target;
-    if (!target) return res.status(400).json({ error: 'Alvo ausente' });
+    
+    if (!target) {
+        return res.status(400).json({ error: 'Alvo ausente' });
+    }
 
-    // Lista de portas para testar
+    // Limpa o target (remove http e barras)
+    const cleanTarget = target.replace(/^https?:\/\//i, '').split('/')[0];
+
     const ports = [
         { port: 21, service: 'FTP' },
         { port: 22, service: 'SSH' },
@@ -145,36 +151,41 @@ app.get('/api/scan', async (req, res) => {
         { port: 8080, service: 'HTTP-Proxy' }
     ];
 
-    // Função que testa a porta TCP real
     const checkPort = (port, host) => {
         return new Promise((resolve) => {
             const socket = new net.Socket();
-            const timeout = 2000; // 2 segundos
+            socket.setTimeout(2500); // 2.5 segundos
 
-            socket.setTimeout(timeout);
             socket.on('connect', () => {
                 socket.destroy();
                 resolve('Aberta');
             });
+
             socket.on('timeout', () => {
                 socket.destroy();
                 resolve('Fechada/Filtrada');
             });
+
             socket.on('error', () => {
                 socket.destroy();
                 resolve('Fechada');
             });
+
             socket.connect(port, host);
         });
     };
 
-    const results = [];
-    for (const p of ports) {
-        const status = await checkPort(p.port, target);
-        results.push({ ...p, status });
+    try {
+        const results = [];
+        // Faz o scan de todas as portas
+        for (const p of ports) {
+            const status = await checkPort(p.port, cleanTarget);
+            results.push({ ...p, status });
+        }
+        res.json({ target: cleanTarget, results });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
-
-    res.json({ target, results });
 });
 
 // --- INICIALIZAÇÃO ---
