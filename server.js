@@ -1,4 +1,4 @@
-// server.js - SUPER SERVIDOR VM SECURITY (UNIFICADO) - v3
+// server.js - SUPER SERVIDOR VM SECURITY (UNIFICADO) - v4 FINAL
 const express = require('express');
 const axios = require('axios');
 const https = require('https');
@@ -78,12 +78,12 @@ app.get('/hunt', requireAuth, async (req, res) => {
         res.json({
             emails: [...new Set(html.match(emailRegex) || [])],
             phones: [...new Set(html.match(phoneRegex) || [])],
-            socials: [] // Adicione regex de redes sociais se precisar
+            socials: []
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ROTA DO VULNERABILITY (Aceita /analyze e /api/scan)
+// ROTA DO VULNERABILITY (Melhorada para detectar Servidor e Tecnologia)
 const analyzeHandler = async (req, res) => {
     const targetUrl = req.query.url || (req.body && req.body.url);
     if (!targetUrl) return res.status(400).json({ error: 'URL obrigatória' });
@@ -92,6 +92,8 @@ const analyzeHandler = async (req, res) => {
         const h = resp.headers || {};
         res.json({
             status: resp.status,
+            server: h['server'] || 'Não detectado',
+            technology: h['x-powered-by'] || h['via'] || 'Não detectada',
             securityHeaders: {
                 'x-frame-options': h['x-frame-options'] || 'MISSING',
                 'strict-transport-security': h['strict-transport-security'] || 'MISSING',
@@ -102,7 +104,7 @@ const analyzeHandler = async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 };
 app.get('/analyze', requireAuth, analyzeHandler);
-app.get('/api/scan', requireAuth, analyzeHandler); // Resolve o erro 404
+app.get('/api/scan', requireAuth, analyzeHandler);
 app.post('/api/scan', requireAuth, analyzeHandler);
 
 // ROTAS DO 24x7 (UPTIME)
@@ -115,15 +117,18 @@ app.post('/api/sites', requireAuth, async (req, res) => {
     if (!url) return res.status(400).json({ error: 'URL obrigatória' });
     const site = { id: Date.now().toString(36), url, name: name || url, lastCheck: null };
     DB.sites.push(site);
-    await checkSite(site); // Checa na hora que adiciona!
+    await checkSite(site);
     saveData();
     res.json(site);
 });
 
-app.get('/api/check-now', requireAuth, async (req, res) => {
+// CORREÇÃO: Aceita GET e POST para check-now
+const checkNowHandler = async (req, res) => {
     await runChecks();
-    res.json({ ok: true, sites: DB.sites });
-});
+    res.json({ ok: true, summary: DB.sites.map(s => ({ id: s.id, url: s.url, lastCheck: s.lastCheck })) });
+};
+app.get('/api/check-now', requireAuth, checkNowHandler);
+app.post('/api/check-now', requireAuth, checkNowHandler);
 
 // FUNÇÃO DE CHECAGEM
 async function checkSite(site) {
