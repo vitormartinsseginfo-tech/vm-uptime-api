@@ -15,12 +15,16 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 // --- CONFIGURAÇÃO DE CORS (Para todas as ferramentas) ---
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    // Permite seus subdomínios e evita erro de Wildcard com Credentials
-    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    
+    // Se houver uma origem, reflete ela, senão usa '*'
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(204);
+    }
     next();
 });
 
