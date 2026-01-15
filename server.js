@@ -133,7 +133,7 @@ app.all(['/check-now', '/api/check-now'], async (req, res) => {
 
 // --- NOVA FERRAMENTA: PORT SCANNER ---
 
-app.get('/api/scan', async (req, res) => {
+app.get('/api/portcheck', async (req, res) => {
     try {
         let target = req.query.target;
         
