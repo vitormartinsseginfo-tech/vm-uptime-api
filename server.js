@@ -130,60 +130,67 @@ app.all(['/check-now', '/api/check-now'], async (req, res) => {
 // --- NOVA FERRAMENTA: PORT SCANNER ---
 
 app.get('/api/scan', async (req, res) => {
-    const target = req.query.target;
-    
-    if (!target) {
-        return res.status(400).json({ error: 'Alvo ausente' });
-    }
-
-    // Limpa o target (remove http e barras)
-    const cleanTarget = target.replace(/^https?:\/\//i, '').split('/')[0];
-
-    const ports = [
-        { port: 21, service: 'FTP' },
-        { port: 22, service: 'SSH' },
-        { port: 80, service: 'HTTP' },
-        { port: 443, service: 'HTTPS' },
-        { port: 3306, service: 'MySQL' },
-        { port: 3389, service: 'RDP' },
-        { port: 5432, service: 'PostgreSQL' },
-        { port: 8080, service: 'HTTP-Proxy' }
-    ];
-
-    const checkPort = (port, host) => {
-        return new Promise((resolve) => {
-            const socket = new net.Socket();
-            socket.setTimeout(2500); // 2.5 segundos
-
-            socket.on('connect', () => {
-                socket.destroy();
-                resolve('Aberta');
-            });
-
-            socket.on('timeout', () => {
-                socket.destroy();
-                resolve('Fechada/Filtrada');
-            });
-
-            socket.on('error', () => {
-                socket.destroy();
-                resolve('Fechada');
-            });
-
-            socket.connect(port, host);
-        });
-    };
-
     try {
+        let target = req.query.target;
+        
+        if (!target) {
+            return res.json({ error: 'Alvo ausente', results: [] });
+        }
+
+        // Limpeza profunda do alvo: remove http, https, www e barras
+        const cleanTarget = target
+            .replace(/^https?:\/\//i, '')
+            .replace(/^www\./i, '')
+            .split('/')[0]
+            .split(':')[0];
+
+        const ports = [
+            { port: 21, service: 'FTP' },
+            { port: 22, service: 'SSH' },
+            { port: 80, service: 'HTTP' },
+            { port: 443, service: 'HTTPS' },
+            { port: 3306, service: 'MySQL' },
+            { port: 3389, service: 'RDP' },
+            { port: 5432, service: 'PostgreSQL' },
+            { port: 8080, service: 'HTTP-Proxy' }
+        ];
+
+        const checkPort = (port, host) => {
+            return new Promise((resolve) => {
+                const socket = new net.Socket();
+                socket.setTimeout(2000); // 2 segundos de espera
+
+                socket.on('connect', () => {
+                    socket.destroy();
+                    resolve('Aberta');
+                });
+
+                socket.on('timeout', () => {
+                    socket.destroy();
+                    resolve('Fechada/Filtrada');
+                });
+
+                socket.on('error', () => {
+                    socket.destroy();
+                    resolve('Fechada');
+                });
+
+                socket.connect(port, host);
+            });
+        };
+
         const results = [];
-        // Faz o scan de todas as portas
+        // Executa o scan porta por porta
         for (const p of ports) {
             const status = await checkPort(p.port, cleanTarget);
             results.push({ ...p, status });
         }
+
         res.json({ target: cleanTarget, results });
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Erro no scan:', error);
+        res.json({ error: 'Erro interno no servidor', results: [] });
     }
 });
 
