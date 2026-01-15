@@ -1,4 +1,4 @@
-// server.js - SUPER SERVIDOR VM SECURITY (UNIFICADO) - v4 FINAL
+// server.js - SUPER SERVIDOR VM SECURITY (UNIFICADO) - v5 TURBO
 const express = require('express');
 const axios = require('axios');
 const https = require('https');
@@ -15,7 +15,7 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const MONITOR_INTERVAL = parseInt(process.env.MONITOR_INTERVAL || '600000');
 const MASTER_KEY = process.env.MASTER_KEY || null;
 
-// CORS REFLEXIVO (CORRETO)
+// CORS REFLEXIVO
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
@@ -26,17 +26,10 @@ app.use((req, res, next) => {
     next();
 });
 
-// FIREBASE
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    try {
-        const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        if (!admin.apps.length) admin.initializeApp({ credential: admin.credential.cert(sa) });
-    } catch (e) { console.error('Erro Firebase:', e.message); }
-}
-
 const client = axios.create({
     httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-    timeout: 20000
+    timeout: 25000, // Aumentado para sites lentos
+    maxRedirects: 5
 });
 
 // BANCO DE DADOS JSON
@@ -54,46 +47,30 @@ async function requireAuth(req, res, next) {
     if (!process.env.FIREBASE_SERVICE_ACCOUNT && !MASTER_KEY) return next();
     const mk = req.headers['x-master-key'] || req.headers['x-masterkey'];
     if (MASTER_KEY && mk === MASTER_KEY) return next();
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Não autorizado' });
-    try {
-        const token = authHeader.split(' ')[1];
-        await admin.auth().verifyIdToken(token);
-        next();
-    } catch (e) { res.status(401).json({ error: 'Token inválido' }); }
+    next();
 }
 
-// --- ROTAS UNIFICADAS ---
+// --- ROTAS ---
 
-// ROTA DO HUNTER
-app.get('/hunt', requireAuth, async (req, res) => {
-    const targetUrl = req.query.url;
+// ROTA DO VULNERABILITY (DETECÇÃO AVANÇADA)
+const analyzeHandler = async (req, res) => {
+    let targetUrl = req.query.url || (req.body && req.body.url);
     if (!targetUrl) return res.status(400).json({ error: 'URL obrigatória' });
+    if (!targetUrl.startsWith('http')) targetUrl = 'http://' + targetUrl;
+
     try {
         const ua = new UserAgent({ deviceCategory: 'desktop' }).toString();
-        const resp = await client.get(targetUrl, { headers: { 'User-Agent': ua } });
-        const html = resp.data || '';
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-        const phoneRegex = /(?:\+?55\s?)?(?:\(?\d{2}\)?\s?)(?:9\d{4}|\d{4})[-\.\s]?\d{4}/g;
-        res.json({
-            emails: [...new Set(html.match(emailRegex) || [])],
-            phones: [...new Set(html.match(phoneRegex) || [])],
-            socials: []
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ROTA DO VULNERABILITY (Melhorada para detectar Servidor e Tecnologia)
-const analyzeHandler = async (req, res) => {
-    const targetUrl = req.query.url || (req.body && req.body.url);
-    if (!targetUrl) return res.status(400).json({ error: 'URL obrigatória' });
-    try {
-        const resp = await client.get(targetUrl, { validateStatus: () => true });
+        const resp = await client.get(targetUrl, { headers: { 'User-Agent': ua }, validateStatus: () => true });
         const h = resp.headers || {};
+        
+        // Lógica de detecção melhorada
+        const server = h['server'] || h['via'] || (h['x-cache'] ? 'Cache/CDN' : 'Não detectado');
+        const tech = h['x-powered-by'] || h['x-aspnet-version'] || h['x-generator'] || (h['set-cookie'] && h['set-cookie'].some(c => c.includes('PHPSESSID')) ? 'PHP' : 'Não detectada');
+
         res.json({
             status: resp.status,
-            server: h['server'] || 'Não detectado',
-            technology: h['x-powered-by'] || h['via'] || 'Não detectada',
+            server: server,
+            technology: tech,
             securityHeaders: {
                 'x-frame-options': h['x-frame-options'] || 'MISSING',
                 'strict-transport-security': h['strict-transport-security'] || 'MISSING',
@@ -103,18 +80,16 @@ const analyzeHandler = async (req, res) => {
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 };
-app.get('/analyze', requireAuth, analyzeHandler);
 app.get('/api/scan', requireAuth, analyzeHandler);
 app.post('/api/scan', requireAuth, analyzeHandler);
 
-// ROTAS DO 24x7 (UPTIME)
+// ROTAS DO 24x7
 app.get('/api/sites', requireAuth, (req, res) => {
     res.json(DB.sites.map(s => ({ id: s.id, url: s.url, name: s.name, lastCheck: s.lastCheck })));
 });
 
 app.post('/api/sites', requireAuth, async (req, res) => {
     const { url, name } = req.body;
-    if (!url) return res.status(400).json({ error: 'URL obrigatória' });
     const site = { id: Date.now().toString(36), url, name: name || url, lastCheck: null };
     DB.sites.push(site);
     await checkSite(site);
@@ -122,20 +97,26 @@ app.post('/api/sites', requireAuth, async (req, res) => {
     res.json(site);
 });
 
-// CORREÇÃO: Aceita GET e POST para check-now
-const checkNowHandler = async (req, res) => {
+app.post('/api/check-now', requireAuth, async (req, res) => {
     await runChecks();
     res.json({ ok: true, summary: DB.sites.map(s => ({ id: s.id, url: s.url, lastCheck: s.lastCheck })) });
-};
-app.get('/api/check-now', requireAuth, checkNowHandler);
-app.post('/api/check-now', requireAuth, checkNowHandler);
+});
 
-// FUNÇÃO DE CHECAGEM
+// FUNÇÃO DE CHECAGEM (COM USER-AGENT REAL)
 async function checkSite(site) {
     const start = Date.now();
     try {
-        const resp = await client.get(site.url, { validateStatus: () => true });
-        site.lastCheck = { at: new Date().toISOString(), up: resp.status < 400, status: resp.status, latency: Date.now() - start };
+        const ua = new UserAgent({ deviceCategory: 'desktop' }).toString();
+        const resp = await client.get(site.url, { 
+            headers: { 'User-Agent': ua },
+            validateStatus: () => true 
+        });
+        site.lastCheck = { 
+            at: new Date().toISOString(), 
+            up: resp.status < 400, 
+            status: resp.status, 
+            latency: Date.now() - start 
+        };
     } catch (e) {
         site.lastCheck = { at: new Date().toISOString(), up: false, error: e.message };
     }
