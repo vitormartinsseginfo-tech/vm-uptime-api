@@ -293,5 +293,43 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
   }
 });
 
+// Rota para a ferramenta VMIntelligence
+app.get('/analyze', async (req, res) => {
+    const target = req.query.target;
+    const VT_API_KEY = 'd1d8eebe6a2d95b168dc633bfdb225d60244ea5dded7ce08d22d71019449b396';
+    const ABUSE_API_KEY = '416189550a1c3338eeb57720d7f0269e2665dfcf44d27fc2e03f870d0807ff8826ebe6b13618497a';
+
+    if (!target) return res.status(400).json({ error: 'Alvo não fornecido' });
+
+    try {
+        let results = { type: '', vt: null, abuse: null };
+
+        // Identifica se é IP (Regex simples)
+        const isIP = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(target);
+
+        if (isIP) {
+            results.type = 'IP';
+            // Consulta AbuseIPDB
+            const abuseRes = await axios.get(`https://api.abuseipdb.com/api/v2/check`, {
+                params: { ipAddress: target, maxAgeInDays: 90 },
+                headers: { 'Key': ABUSE_API_KEY, 'Accept': 'application/json' }
+            });
+            results.abuse = abuseRes.data.data;
+        }
+
+        // Consulta VirusTotal (Funciona para IP, Domínio e Hash)
+        // Nota: Para domínios e hashes a URL muda levemente na API v3, 
+        // mas para simplificar, vamos usar a busca geral
+        const vtRes = await axios.get(`https://www.virustotal.com/api/v3/search?query=${target}`, {
+            headers: { 'x-apikey': VT_API_KEY }
+        });
+        results.vt = vtRes.data;
+
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro na análise', details: error.message });
+    }
+});
+
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
