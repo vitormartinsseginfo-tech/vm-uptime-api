@@ -294,12 +294,6 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
 });
 
 // Rota para a ferramenta VMIntelligence
-const express = require('express');
-const axios = require('axios');
-const bodyParser = require('body-parser');
-
-const app = express();
-app.use(bodyParser.json());
 
 // Config via ENV (set these on Render)
 const VT_API_KEY = process.env.VT_API_KEY || '';
