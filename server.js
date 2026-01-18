@@ -293,190 +293,114 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
   }
 });
 
-// --- VMIntelligence module (safe insert) ---
-if (!global.VMIntelligence) {
-  global.VMIntelligence = (function () {
-    // Checagens básicas
-    if (typeof app === 'undefined') {
-      console.error('VMIntelligence: erro - variável "app" não encontrada. Cole este bloco após a criação do app (const app = express()).');
-      return {};
-    }
-    if (typeof axios === 'undefined') {
-      console.error('VMIntelligence: erro - "axios" não encontrado. Instale e require axios no topo do server.js.');
-      return {};
+// --- VMIntelligence module (safe insert v2) ---
+(function () {
+    if (typeof app === 'undefined' || typeof axios === 'undefined') {
+        console.error('VMIntelligence: app ou axios não definidos.');
+        return;
     }
 
-    // Config via ENV
+    // Inicializa o objeto global se não existir
+    if (!global.VMIntelligence) {
+        global.VMIntelligence = { routesAdded: false };
+    }
+
+    if (global.VMIntelligence.routesAdded) {
+        console.log('VMIntelligence já carregado.');
+        return;
+    }
+
     const VT_API_KEY = process.env.VT_API_KEY || '';
     const ABUSE_API_KEY = process.env.ABUSE_API_KEY || '';
-
-    // Cache local ao namespace (não sobrescreve globals)
     const cache = new Map();
-    const DEFAULT_TTL = 1000 * 60 * 60; // 1 hora
-    function setCache(key, value, ttl = DEFAULT_TTL) { cache.set(key, { ts: Date.now(), ttl, value }); }
-    function getCache(key) {
-      const e = cache.get(key);
-      if (!e) return null;
-      if (Date.now() - e.ts > e.ttl) { cache.delete(key); return null; }
-      return e.value;
-    }
 
-    // Helpers
     const isIP = s => /^(?:\d{1,3}\.){3}\d{1,3}$/.test((s || '').trim());
     const isHash = s => /^[a-fA-F0-9]{32,64}$/.test((s || '').trim());
 
-    // VT helpers
     async function vtGetIP(ip) {
-      const k = `vt:ip:${ip}`;
-      const cached = getCache(k); if (cached) return cached;
-      const res = await axios.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, { headers: { 'x-apikey': VT_API_KEY } });
-      setCache(k, res.data);
-      return res.data;
+        const res = await axios.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, { headers: { 'x-apikey': VT_API_KEY } });
+        return res.data;
     }
     async function vtGetDomain(domain) {
-      const k = `vt:domain:${domain}`;
-      const cached = getCache(k); if (cached) return cached;
-      const res = await axios.get(`https://www.virustotal.com/api/v3/domains/${domain}`, { headers: { 'x-apikey': VT_API_KEY } });
-      setCache(k, res.data);
-      return res.data;
+        const res = await axios.get(`https://www.virustotal.com/api/v3/domains/${domain}`, { headers: { 'x-apikey': VT_API_KEY } });
+        return res.data;
     }
     async function vtGetFile(hash) {
-      const k = `vt:file:${hash}`;
-      const cached = getCache(k); if (cached) return cached;
-      const res = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, { headers: { 'x-apikey': VT_API_KEY } });
-      setCache(k, res.data);
-      return res.data;
+        const res = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, { headers: { 'x-apikey': VT_API_KEY } });
+        return res.data;
     }
-
-    // AbuseIPDB helper
     async function abuseCheckIP(ip) {
-      const k = `abuse:ip:${ip}`;
-      const cached = getCache(k); if (cached) return cached;
-      const res = await axios.get('https://api.abuseipdb.com/api/v2/check', {
-        params: { ipAddress: ip, maxAgeInDays: 90 },
-        headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
-      });
-      setCache(k, res.data.data);
-      return res.data.data;
+        const res = await axios.get('https://api.abuseipdb.com/api/v2/check', {
+            params: { ipAddress: ip, maxAgeInDays: 90 },
+            headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
+        });
+        return res.data.data;
     }
 
-    // Classificação simples
     function classifyResult({ vt, abuse }) {
-      let malicious = false;
-      const reasons = [];
-      if (abuse && typeof abuse.abuseConfidenceScore !== 'undefined') {
-        const score = Number(abuse.abuseConfidenceScore || 0);
-        if (score >= 10) { malicious = true; reasons.push(`AbuseIPDB score ${score}`); }
-      }
-      if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
-        const stats = vt.data.attributes.last_analysis_stats;
-        const maliciousCount = Number(stats.malicious || 0);
-        if (maliciousCount > 0) { malicious = true; reasons.push(`VirusTotal: ${maliciousCount} detections`); }
-      } else if (vt && Array.isArray(vt.data) && vt.data.length) {
-        const d = vt.data[0];
-        if (d && d.attributes && d.attributes.last_analysis_stats) {
-          const s = d.attributes.last_analysis_stats;
-          if ((s.malicious || 0) > 0) { malicious = true; reasons.push(`VirusTotal: ${s.malicious} detections`); }
+        let malicious = false;
+        const reasons = [];
+        if (abuse && Number(abuse.abuseConfidenceScore || 0) >= 10) {
+            malicious = true;
+            reasons.push(`AbuseIPDB score ${abuse.abuseConfidenceScore}`);
         }
-      }
-      return { malicious, reasons };
-    }
-
-    // Se já adicionou rotas, não adiciona novamente
-    if (!global.VMIntelligence.routesAdded) {
-
-      // Middleware opcional: se existir verifyFirebaseToken global, usa para proteger rotas
-      async function authMiddleware(req, res, next) {
-        if (typeof global.verifyFirebaseToken !== 'function') return next();
-        const auth = req.headers.authorization || '';
-        if (!auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized: no token' });
-        const token = auth.split(' ')[1];
-        try {
-          const decoded = await global.verifyFirebaseToken(token);
-          req.user = decoded;
-          return next();
-        } catch (err) {
-          return res.status(401).json({ error: 'Unauthorized', details: err.message });
-        }
-      }
-
-      // Endpoint single
-      app.get('/analyze', authMiddleware, async (req, res) => {
-        const target = (req.query.target || '').trim();
-        if (!target) return res.status(400).json({ error: 'target query param required' });
-        try {
-          const result = { target, type: 'unknown', vt: null, abuse: null, classification: null };
-          if (isIP(target)) {
-            result.type = 'ip';
-            const [abuse, vt] = await Promise.allSettled([abuseCheckIP(target), vtGetIP(target)]);
-            if (abuse.status === 'fulfilled') result.abuse = abuse.value;
-            if (vt.status === 'fulfilled') result.vt = vt.value;
-          } else if (isHash(target)) {
-            result.type = 'hash';
-            result.vt = await vtGetFile(target);
-          } else {
-            result.type = 'domain';
-            result.vt = await vtGetDomain(target);
-          }
-          result.classification = classifyResult({ vt: result.vt, abuse: result.abuse });
-          return res.json(result);
-        } catch (err) {
-          console.error('VMIntelligence /analyze error:', err.message || err);
-          return res.status(500).json({ error: 'internal_error', details: err.message || String(err) });
-        }
-      });
-
-      // Endpoint batch
-      app.post('/batch', authMiddleware, async (req, res) => {
-        const targets = Array.isArray(req.body.targets) ? req.body.targets : [];
-        if (!targets.length) return res.status(400).json({ error: 'Provide JSON body with targets array' });
-
-        const results = [];
-        for (const raw of targets) {
-          const t = String(raw).trim();
-          if (!t) continue;
-          try {
-            const cached = getCache(`analyzed:${t}`);
-            if (cached) { results.push(cached); continue; }
-
-            const entry = { target: t, type: 'unknown', vt: null, abuse: null, classification: null };
-            if (isIP(t)) {
-              entry.type = 'ip';
-              const [abuse, vt] = await Promise.allSettled([abuseCheckIP(t), vtGetIP(t)]);
-              if (abuse.status === 'fulfilled') entry.abuse = abuse.value;
-              if (vt.status === 'fulfilled') entry.vt = vt.value;
-            } else if (isHash(t)) {
-              entry.type = 'hash';
-              entry.vt = await vtGetFile(t);
-            } else {
-              entry.type = 'domain';
-              entry.vt = await vtGetDomain(t);
+        if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
+            const s = vt.data.attributes.last_analysis_stats;
+            if (Number(s.malicious || 0) > 0) {
+                malicious = true;
+                reasons.push(`VirusTotal: ${s.malicious} detections`);
             }
-            entry.classification = classifyResult({ vt: entry.vt, abuse: entry.abuse });
-            setCache(`analyzed:${t}`, entry);
-            results.push(entry);
-
-            // pequeno delay para reduzir chance de rate-limit
-            await new Promise(r => setTimeout(r, 350));
-          } catch (err) {
-            results.push({ target: t, error: err.message || String(err) });
-          }
         }
-
-        const malicious = results.filter(r => r.classification && r.classification.malicious);
-        const clean = results.filter(r => r.classification && !r.classification.malicious);
-        return res.json({ total: results.length, maliciousCount: malicious.length, cleanCount: clean.length, malicious, clean, all: results });
-      });
-
-      global.VMIntelligence.routesAdded = true;
+        return { malicious, reasons };
     }
 
-    console.log('VMIntelligence module loaded (routes added if not present).');
-    return { vtKey: VT_API_KEY, abuseKey: ABUSE_API_KEY };
-  })();
-} else {
-  console.log('VMIntelligence already loaded, skipping duplicate injection.');
-}
+    // Endpoints
+    app.get('/analyze', async (req, res) => {
+        const target = (req.query.target || '').trim();
+        if (!target) return res.status(400).json({ error: 'Alvo necessário' });
+        try {
+            let result = { target, type: 'unknown', vt: null, abuse: null };
+            if (isIP(target)) {
+                result.type = 'ip';
+                const [a, v] = await Promise.allSettled([abuseCheckIP(target), vtGetIP(target)]);
+                if (a.status === 'fulfilled') result.abuse = a.value;
+                if (v.status === 'fulfilled') result.vt = v.value;
+            } else if (isHash(target)) {
+                result.type = 'hash';
+                result.vt = await vtGetFile(target);
+            } else {
+                result.type = 'domain';
+                result.vt = await vtGetDomain(target);
+            }
+            result.classification = classifyResult({ vt: result.vt, abuse: result.abuse });
+            res.json(result);
+        } catch (err) { res.status(500).json({ error: err.message }); }
+    });
+
+    app.post('/batch', async (req, res) => {
+        const targets = Array.isArray(req.body.targets) ? req.body.targets : [];
+        const results = [];
+        for (const t of targets) {
+            try {
+                let entry = { target: t, classification: { malicious: false } };
+                if (isIP(t)) {
+                    const [a, v] = await Promise.allSettled([abuseCheckIP(t), vtGetIP(t)]);
+                    entry.classification = classifyResult({ vt: v.value, abuse: a.value });
+                }
+                results.push(entry);
+                await new Promise(r => setTimeout(r, 400));
+            } catch (e) { results.push({ target: t, error: e.message }); }
+        }
+        res.json({ 
+            malicious: results.filter(r => r.classification?.malicious),
+            clean: results.filter(r => !r.classification?.malicious),
+            all: results 
+        });
+    });
+
+    global.VMIntelligence.routesAdded = true;
+    console.log('✅ VMIntelligence carregado com sucesso.');
+})();
 
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
