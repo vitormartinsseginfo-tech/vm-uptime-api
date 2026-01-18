@@ -507,11 +507,5 @@ app.post('/batch', authMiddleware, async (req, res) => {
   return res.json({ total: results.length, maliciousCount: malicious.length, cleanCount: clean.length, malicious, clean, all: results });
 });
 
-app.get('/', (req, res) => res.send({ ok: true, msg: 'VMIntelligence API' }));
-
-app.listen(PORT, () => {
-  console.log(`VMIntelligence server listening on port ${PORT}`);
-});
-
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
