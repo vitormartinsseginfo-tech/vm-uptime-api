@@ -294,41 +294,229 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
 });
 
 // Rota para a ferramenta VMIntelligence
-app.get('/analyze', async (req, res) => {
-    const target = req.query.target;
-    const VT_API_KEY = 'd1d8eebe6a2d95b168dc633bfdb225d60244ea5dded7ce08d22d71019449b396';
-    const ABUSE_API_KEY = '416189550a1c3338eeb57720d7f0269e2665dfcf44d27fc2e03f870d0807ff8826ebe6b13618497a';
+const express = require('express');
+const axios = require('axios');
+const bodyParser = require('body-parser');
 
-    if (!target) return res.status(400).json({ error: 'Alvo não fornecido' });
+const app = express();
+app.use(bodyParser.json());
 
-    try {
-        let results = { type: '', vt: null, abuse: null };
+// Config via ENV (set these on Render)
+const VT_API_KEY = process.env.VT_API_KEY || '';
+const ABUSE_API_KEY = process.env.ABUSE_API_KEY || '';
+const FIREBASE_SERVICE_ACCOUNT = process.env.FIREBASE_SERVICE_ACCOUNT || null; // JSON string
+const PORT = process.env.PORT || 3000;
 
-        // Identifica se é IP (Regex simples)
-        const isIP = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(target);
+// Simple in-memory cache
+const cache = new Map(); // key -> { ts: Date.now(), ttl: ms, value }
+const DEFAULT_TTL = 1000 * 60 * 60; // 1h
 
-        if (isIP) {
-            results.type = 'IP';
-            // Consulta AbuseIPDB
-            const abuseRes = await axios.get(`https://api.abuseipdb.com/api/v2/check`, {
-                params: { ipAddress: target, maxAgeInDays: 90 },
-                headers: { 'Key': ABUSE_API_KEY, 'Accept': 'application/json' }
-            });
-            results.abuse = abuseRes.data.data;
-        }
+function setCache(key, value, ttl = DEFAULT_TTL) {
+  cache.set(key, { ts: Date.now(), ttl, value });
+}
+function getCache(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > entry.ttl) { cache.delete(key); return null; }
+  return entry.value;
+}
 
-        // Consulta VirusTotal (Funciona para IP, Domínio e Hash)
-        // Nota: Para domínios e hashes a URL muda levemente na API v3, 
-        // mas para simplificar, vamos usar a busca geral
-        const vtRes = await axios.get(`https://www.virustotal.com/api/v3/search?query=${target}`, {
-            headers: { 'x-apikey': VT_API_KEY }
-        });
-        results.vt = vtRes.data;
+// Optional Firebase Admin init (for token verification)
+let verifyFirebaseToken = null;
+if (FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const admin = require('firebase-admin');
+    const serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    verifyFirebaseToken = async (idToken) => {
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      return decoded; // returns decoded token (uid, email, etc)
+    };
+    console.log('Firebase Admin initialized: auth token verification enabled.');
+  } catch (err) {
+    console.warn('Failed to init Firebase Admin:', err.message);
+    verifyFirebaseToken = null;
+  }
+} else {
+  console.log('FIREBASE_SERVICE_ACCOUNT not set - skipping Firebase token verification.');
+}
 
-        res.json(results);
-    } catch (error) {
-        res.status(500).json({ error: 'Erro na análise', details: error.message });
+// Helper: identify type
+const isIP = (s) => /^(?:\d{1,3}\.){3}\d{1,3}$/.test(s.trim());
+const isHash = (s) => /^[a-fA-F0-9]{32,64}$/.test(s.trim());
+
+// Helper: VirusTotal requests
+async function vtGetIP(ip) {
+  const cached = getCache(`vt:ip:${ip}`);
+  if (cached) return cached;
+  const res = await axios.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, {
+    headers: { 'x-apikey': VT_API_KEY }
+  });
+  setCache(`vt:ip:${ip}`, res.data, DEFAULT_TTL);
+  return res.data;
+}
+async function vtGetDomain(domain) {
+  const cached = getCache(`vt:domain:${domain}`);
+  if (cached) return cached;
+  const res = await axios.get(`https://www.virustotal.com/api/v3/domains/${domain}`, {
+    headers: { 'x-apikey': VT_API_KEY }
+  });
+  setCache(`vt:domain:${domain}`, res.data, DEFAULT_TTL);
+  return res.data;
+}
+async function vtGetFile(hash) {
+  const cached = getCache(`vt:file:${hash}`);
+  if (cached) return cached;
+  const res = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
+    headers: { 'x-apikey': VT_API_KEY }
+  });
+  setCache(`vt:file:${hash}`, res.data, DEFAULT_TTL);
+  return res.data;
+}
+
+// Helper: AbuseIPDB
+async function abuseCheckIP(ip) {
+  const cached = getCache(`abuse:ip:${ip}`);
+  if (cached) return cached;
+  const res = await axios.get('https://api.abuseipdb.com/api/v2/check', {
+    params: { ipAddress: ip, maxAgeInDays: 90 },
+    headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
+  });
+  setCache(`abuse:ip:${ip}`, res.data.data, DEFAULT_TTL);
+  return res.data.data; // object
+}
+
+// Classification helper
+function classifyResult({ vt, abuse }) {
+  let malicious = false;
+  let reasons = [];
+
+  if (abuse && typeof abuse.abuseConfidenceScore !== 'undefined') {
+    const score = Number(abuse.abuseConfidenceScore || 0);
+    if (score >= 10) { malicious = true; reasons.push(`AbuseIPDB: score ${score}`); }
+  }
+
+  if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
+    const stats = vt.data.attributes.last_analysis_stats;
+    const maliciousCount = Number(stats.malicious || 0);
+    if (maliciousCount > 0) { malicious = true; reasons.push(`VirusTotal: ${maliciousCount} engines flagged`); }
+  } else if (vt && vt.data && Array.isArray(vt.data)) {
+    // older search responses
+    const d = vt.data[0];
+    if (d && d.attributes && d.attributes.last_analysis_stats) {
+      const stats = d.attributes.last_analysis_stats;
+      if ((stats.malicious || 0) > 0) { malicious = true; reasons.push(`VirusTotal: ${stats.malicious} engines flagged`); }
     }
+  }
+
+  return { malicious, reasons };
+}
+
+// Middleware: optional Firebase token verification
+async function authMiddleware(req, res, next) {
+  if (!verifyFirebaseToken) return next(); // auth disabled
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized: no token' });
+  const idToken = authHeader.split(' ')[1];
+  try {
+    const decoded = await verifyFirebaseToken(idToken);
+    req.user = decoded;
+    return next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: invalid token', details: err.message });
+  }
+}
+
+// Single analyze endpoint
+app.get('/analyze', authMiddleware, async (req, res) => {
+  const target = (req.query.target || '').trim();
+  if (!target) return res.status(400).json({ error: 'target query param required' });
+
+  try {
+    const result = { target, type: 'unknown', vt: null, abuse: null, classification: null };
+
+    if (isIP(target)) {
+      result.type = 'ip';
+      // Abuse + VT
+      const [abuse, vt] = await Promise.allSettled([abuseCheckIP(target), vtGetIP(target)]);
+      if (abuse.status === 'fulfilled') result.abuse = abuse.value;
+      if (vt.status === 'fulfilled') result.vt = vt.value;
+    } else if (isHash(target)) {
+      result.type = 'hash';
+      const vt = await vtGetFile(target);
+      result.vt = vt;
+    } else {
+      result.type = 'domain';
+      const vt = await vtGetDomain(target);
+      result.vt = vt;
+    }
+
+    const classification = classifyResult({ vt: result.vt, abuse: result.abuse });
+    result.classification = classification;
+
+    return res.json(result);
+  } catch (err) {
+    console.error('analyze error', err.message);
+    return res.status(500).json({ error: 'internal_error', details: err.message });
+  }
+});
+
+// Batch analyze endpoint
+// Expects JSON: { targets: ["1.2.3.4","domain.com","<hash>", ...] }
+app.post('/batch', authMiddleware, async (req, res) => {
+  const targets = Array.isArray(req.body.targets) ? req.body.targets : [];
+  if (!targets.length) return res.status(400).json({ error: 'Provide JSON body with targets array' });
+
+  // Rate-limiting/backoff: simple sequential processing with small delay to avoid bursting.
+  const results = [];
+  for (const tRaw of targets) {
+    const t = String(tRaw).trim();
+    if (!t) continue;
+    try {
+      const cached = getCache(`analyzed:${t}`);
+      if (cached) {
+        results.push({ target: t, ...cached });
+        continue;
+      }
+
+      let entry = { target: t, type: 'unknown', vt: null, abuse: null, classification: null };
+      if (isIP(t)) {
+        entry.type = 'ip';
+        const [abuse, vt] = await Promise.allSettled([abuseCheckIP(t), vtGetIP(t)]);
+        if (abuse.status === 'fulfilled') entry.abuse = abuse.value;
+        if (vt.status === 'fulfilled') entry.vt = vt.value;
+      } else if (isHash(t)) {
+        entry.type = 'hash';
+        const vt = await vtGetFile(t);
+        entry.vt = vt;
+      } else {
+        entry.type = 'domain';
+        const vt = await vtGetDomain(t);
+        entry.vt = vt;
+      }
+      const classification = classifyResult({ vt: entry.vt, abuse: entry.abuse });
+      entry.classification = classification;
+      setCache(`analyzed:${t}`, entry, DEFAULT_TTL);
+      results.push(entry);
+
+      // tiny sleep to reduce rate-limit issues (adjust as needed)
+      await new Promise(r => setTimeout(r, 350));
+    } catch (err) {
+      results.push({ target: t, error: err.message });
+    }
+  }
+
+  // Separate lists
+  const malicious = results.filter(r => r.classification && r.classification.malicious);
+  const clean = results.filter(r => r.classification && !r.classification.malicious);
+
+  return res.json({ total: results.length, maliciousCount: malicious.length, cleanCount: clean.length, malicious, clean, all: results });
+});
+
+app.get('/', (req, res) => res.send({ ok: true, msg: 'VMIntelligence API' }));
+
+app.listen(PORT, () => {
+  console.log(`VMIntelligence server listening on port ${PORT}`);
 });
 
 // --- INICIALIZAÇÃO ---
