@@ -12,19 +12,19 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-// --- CONFIGURAÇÃO DE CORS PROFISSIONAL ---
-const allowedOrigins = [
-  'https://vmblue.com.br',
-  'https://www.vmblue.com.br',
-  'https://vm-security.com',
-  'https://www.vm-security.com'
-];
-
+// --- CONFIGURAÇÃO DE CORS (Aceita subdomínios de vmblue e vm-security) ---
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // Se a origem estiver na lista permitida, nós a autorizamos
-  if (allowedOrigins.includes(origin)) {
+  // Permite qualquer host que termine com vmblue.com.br ou vm-security.com
+  const isAllowed = origin && (
+    origin.endsWith('.vmblue.com.br') ||
+    origin === 'https://vmblue.com.br' ||
+    origin.endsWith('.vm-security.com') ||
+    origin === 'https://vm-security.com'
+  );
+
+  if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
