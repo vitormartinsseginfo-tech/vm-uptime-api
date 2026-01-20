@@ -12,20 +12,30 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-// --- CONFIGURAÇÃO DE CORS (Para todas as ferramentas) ---
-app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    
-    // Se houver uma origem, reflete ela, senão usa '*'
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT, PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+// --- CONFIGURAÇÃO DE CORS PROFISSIONAL ---
+const allowedOrigins = [
+  'https://vmblue.com.br',
+  'https://www.vmblue.com.br',
+  'https://vm-security.com',
+  'https://www.vm-security.com'
+];
 
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(204);
-    }
-    next();
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  // Se a origem estiver na lista permitida, nós a autorizamos
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT, PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
 });
 
 // --- BANCO DE DADOS LOCAL (Para o 24x7) ---
