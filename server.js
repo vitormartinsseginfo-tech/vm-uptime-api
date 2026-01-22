@@ -123,7 +123,7 @@ app.delete(['/sites/:id', '/api/sites/:id'], (req, res) => {
 });
 
 app.all(['/check-now', '/api/check-now'], async (req, res) => {
-    const WORKER_URL = 'https://monitor24x7.vm-security.workers.dev'; // URL do seu worker
+    const WORKER_URL = 'https://uptime24x7.vmblue.com.br'; // URL do seu worker
 
     for (const s of DB.sites) {
         try {
