@@ -416,8 +416,8 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
 const { RateLimiterMemory } = require('rate-limiter-flexible');
 
 // Config via env
-const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '50', 10);
-const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '2', 10);
+const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '100', 10);
+const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '10', 10);
 const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '3600', 10);
 const STRESS_ALLOWED_HOSTS = process.env.STRESS_ALLOWED_HOSTS
   ? process.env.STRESS_ALLOWED_HOSTS.split(',').map(s => s.trim()).filter(Boolean)
