@@ -412,209 +412,207 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-// --------- CONFIG (valores padrão via ENV) ----------
-const PORT = parseInt(process.env.PORT || '8080', 10);
-const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
-const STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
-const STRESS_REQUEST_TIMEOUT = parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10);
-const STRESS_BATCH_DELAY = parseInt(process.env.STRESS_BATCH_DELAY || '100', 10);
-const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '3', 10);
-const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '3600', 10);
-
-// Inicializa Firebase Admin se FIREBASE_SERVICE_ACCOUNT estiver definida (JSON string)
-let firebaseEnabled = false;
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  try {
-    const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({ credential: admin.credential.cert(sa) });
-    firebaseEnabled = true;
-    console.log('✅ Firebase Admin inicializado.');
-  } catch (err) {
-    console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT inválido, auth desativada:', err.message);
+// === INÍCIO: Snippet seguro VM Stresser (cole após `const app = express()` no server.js) ===
+(function () {
+  if (typeof app === 'undefined') {
+    console.error('VM Stresser: coloque este snippet após a declaração `const app = express()`');
+    return;
   }
-} else {
-  console.log('ℹ️ FIREBASE_SERVICE_ACCOUNT não fornecido — auth opcional desativada.');
-}
-
-// Rate limiter (por usuário/IP)
-const limiter = new RateLimiterMemory({
-  points: STRESS_RATE_POINTS,
-  duration: STRESS_RATE_DURATION,
-});
-
-// Axios client (timeout configurável)
-const baseClient = axios.create({ timeout: STRESS_REQUEST_TIMEOUT, validateStatus: null });
-
-// Helper: extrair chave para rate limit (UID se Firebase, senão IP)
-async function getLimiterKey(req) {
-  if (firebaseEnabled) {
-    const auth = (req.headers.authorization || '').trim();
-    const token = auth.startsWith('Bearer ') ? auth.split(' ')[1] : (req.query && req.query.token) || null;
-    if (!token) throw new Error('Token ausente (Firebase enabled)');
-    const decoded = await admin.auth().verifyIdToken(token);
-    return decoded.uid || decoded.sub || decoded.email || 'fb-user';
-  } else {
-    return req.ip || req.connection.remoteAddress || 'anonymous';
-  }
-}
-
-// Validação simples de URL alvo
-function validateTargetUrl(targetUrl) {
-  try {
-    const u = new URL(targetUrl);
-    if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Protocolo inválido');
-    return u.toString();
-  } catch (e) {
-    throw new Error('URL inválida: ' + e.message);
-  }
-}
-
-// Runner: envia requisições em batches e chama progressCb para cada resposta
-async function runRequestsInBatches(target, total, opts = {}, progressCb = () => {}) {
-  const batchSize = opts.batchSize || STRESS_BATCH_SIZE;
-  const timeoutMs = opts.timeoutMs || STRESS_REQUEST_TIMEOUT;
-  const batchDelay = opts.batchDelay != null ? opts.batchDelay : STRESS_BATCH_DELAY;
-
-  const clientLocal = axios.create({ timeout: timeoutMs, validateStatus: null });
-  let remaining = total;
-  let sent = 0;
-  let successes = 0;
-  let fails = 0;
-
-  while (remaining > 0) {
-    const currentBatch = Math.min(batchSize, remaining);
-    const promises = [];
-
-    for (let i = 0; i < currentBatch; i++) {
-      const ua = new UserAgent().toString();
-      const p = clientLocal.get(target, { headers: { 'User-Agent': ua, Accept: '*/*' } })
-        .then(res => {
-          sent++;
-          const ok = res.status >= 200 && res.status < 400;
-          if (ok) successes++; else fails++;
-          const out = { idx: sent, ok, status: res.status };
-          progressCb(out);
-          return out;
-        })
-        .catch(err => {
-          sent++;
-          fails++;
-          const out = { idx: sent, ok: false, status: err.code || 'ERR', err: err.message };
-          progressCb(out);
-          return out;
-        });
-      promises.push(p);
-    }
-
-    await Promise.all(promises);
-    remaining -= currentBatch;
-    if (remaining > 0) await new Promise(r => setTimeout(r, batchDelay));
+  if (global.VMStresserRoutesAdded) {
+    console.log('VM Stresser: rotas já registradas, pulando.');
+    return;
   }
 
-  return { sent, successes, fails };
-}
+  // usa módulos já carregados se existirem, senão require
+  const axiosLocal = (typeof axios !== 'undefined') ? axios : require('axios');
+  const UserAgentLocal = (typeof UserAgent !== 'undefined') ? UserAgent : require('user-agents');
+  const { RateLimiterMemory } = (typeof RateLimiterMemory !== 'undefined') ? { RateLimiterMemory } : require('rate-limiter-flexible');
+  const adminLocal = (typeof admin !== 'undefined') ? admin : (function () {
+    try { return require('firebase-admin'); } catch(e){ return null; }
+  })();
 
-// Rota: GET /api/stresser/config -> retorna limites e flags
-app.get('/api/stresser/config', (req, res) => {
-  res.json({
-    max_volume: STRESS_MAX_VOLUME,
-    batch_size: STRESS_BATCH_SIZE,
-    request_timeout_ms: STRESS_REQUEST_TIMEOUT,
-    batch_delay_ms: STRESS_BATCH_DELAY,
-    rate_points: STRESS_RATE_POINTS,
-    rate_duration_seconds: STRESS_RATE_DURATION,
-    firebase_enabled: firebaseEnabled,
-  });
-});
+  // Evita recriar clients/limiters se já existirem globalmente
+  if (!global.VMStresserAxios) {
+    global.VMStresserAxios = axiosLocal.create({ timeout: parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10), validateStatus: null });
+  }
+  const vmClient = global.VMStresserAxios;
 
-// Rota: POST /api/stresser  (execução final, sem stream)
-// Body JSON: { "url": "https://example.com", "volume": 100 }
-app.post('/api/stresser', async (req, res) => {
-  try {
-    const { url: rawUrl, volume } = req.body || {};
-    if (!rawUrl) return res.status(400).json({ error: 'url required' });
+  if (!global.VMStresserUA) global.VMStresserUA = UserAgentLocal;
+  const VMUA = global.VMStresserUA;
 
-    const target = validateTargetUrl(rawUrl);
-    let vol = parseInt(volume || 0, 10);
-    if (vol <= 0) return res.status(400).json({ error: 'invalid volume' });
-    if (vol > STRESS_MAX_VOLUME) vol = STRESS_MAX_VOLUME;
-
-    // rate-limiter
-    let key;
-    try { key = await getLimiterKey(req); } catch (e) { return res.status(401).json({ error: 'auth_required', message: e.message }); }
-    try { await limiter.consume(key, 1); } catch (e) { return res.status(429).json({ error: 'rate_limited' }); }
-
-    const start = Date.now();
-    const result = await runRequestsInBatches(target, vol);
-    const end = Date.now();
-
-    return res.json({
-      sent: result.sent,
-      sucessos: result.successes,
-      falhas: result.fails,
-      tempo_total_ms: end - start,
-      resultado: result.fails > 0 ? 'POTENCIALMENTE IMPACTADO' : 'ESTÁVEL',
+  if (!global.VMStresserLimiter) {
+    global.VMStresserLimiter = new RateLimiterMemory({
+      points: parseInt(process.env.STRESS_RATE_POINTS || '3', 10),
+      duration: parseInt(process.env.STRESS_RATE_DURATION || '3600', 10),
     });
-  } catch (err) {
-    console.error('POST /api/stresser error:', err && err.message ? err.message : err);
-    return res.status(500).json({ error: err.message || 'internal_error' });
   }
-});
+  const vmLimiter = global.VMStresserLimiter;
 
-// Rota: SSE stream -> /api/stresser/stream?url=...&volume=... (&token=... quando firebase enabled)
-app.get('/api/stresser/stream', async (req, res) => {
-  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-  res.flushHeaders();
+  // Configs (nomes únicos para evitar conflito)
+  const VM_STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
+  const VM_STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
+  const VM_STRESS_BATCH_DELAY = parseInt(process.env.STRESS_BATCH_DELAY || '100', 10);
+  const VM_FIREBASE_ENABLED = Boolean(process.env.FIREBASE_SERVICE_ACCOUNT && adminLocal);
 
-  try {
-    const targetRaw = req.query.url;
-    let volume = parseInt(req.query.volume || '0', 10);
-    if (!targetRaw || !volume) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: 'missing_params' })}\n\n`);
-      return res.end();
+  // Helper: valida URL alvo
+  function vmValidateTargetUrl(targetUrl) {
+    try {
+      const u = new URL(targetUrl);
+      if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Protocolo inválido');
+      return u.toString();
+    } catch (e) {
+      throw new Error('URL inválida: ' + e.message);
     }
-
-    const target = validateTargetUrl(targetRaw);
-    if (volume > STRESS_MAX_VOLUME) volume = STRESS_MAX_VOLUME;
-
-    // rate-limiter
-    let key;
-    try { key = await getLimiterKey(req); } catch (e) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: 'auth_required', message: e.message })}\n\n`);
-      return res.end();
-    }
-    try { await limiter.consume(key, 1); } catch (e) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: 'rate_limited' })}\n\n`);
-      return res.end();
-    }
-
-    const start = Date.now();
-    let sentSoFar = 0, successes = 0, fails = 0;
-
-    const progressCb = (pkt) => {
-      if (pkt.ok) successes++; else fails++;
-      sentSoFar = pkt.idx;
-      const data = { idx: pkt.idx, ok: pkt.ok, status: pkt.status, sentSoFar, successes, fails };
-      res.write(`event: packet\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const heartbeat = setInterval(() => {
-      res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentSoFar, successes, fails })}\n\n`);
-    }, 2000);
-
-    const final = await runRequestsInBatches(target, volume, {}, progressCb);
-    clearInterval(heartbeat);
-    const end = Date.now();
-
-    const finalData = { sent: final.sent, sucessos: final.successes, falhas: final.fails, tempo_total_ms: end - start, resultado: final.fails > 0 ? 'POTENCIALMENTE IMPACTADO' : 'ESTÁVEL' };
-    res.write(`event: done\ndata: ${JSON.stringify(finalData)}\n\n`);
-    return res.end();
-  } catch (err) {
-    console.error('SSE error:', err && err.message ? err.message : err);
-    res.write(`event: error\ndata: ${JSON.stringify({ error: err.message || 'internal_error' })}\n\n`);
-    return res.end();
   }
-});
+
+  // Helper: obtém chave para rate limiter (UID se Firebase habilitado, senão IP)
+  async function vmGetLimiterKey(req) {
+    if (VM_FIREBASE_ENABLED && adminLocal) {
+      const auth = (req.headers.authorization || '').trim();
+      const token = auth.startsWith('Bearer ') ? auth.split(' ')[1] : (req.query && req.query.token) || null;
+      if (!token) throw new Error('Token ausente (Firebase habilitado)');
+      const decoded = await adminLocal.auth().verifyIdToken(token);
+      return decoded.uid || decoded.sub || decoded.email || 'fb-user';
+    } else {
+      return req.ip || req.connection.remoteAddress || 'anonymous';
+    }
+  }
+
+  // Runner: envia requisições em batches e chama progressCb para cada resposta
+  async function vmRunRequestsInBatches(target, total, opts = {}, progressCb = () => {}) {
+    const batchSize = opts.batchSize || VM_STRESS_BATCH_SIZE;
+    const batchDelay = opts.batchDelay != null ? opts.batchDelay : VM_STRESS_BATCH_DELAY;
+    const clientLocal = axiosLocal.create({ timeout: parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10), validateStatus: null });
+
+    let remaining = total;
+    let sent = 0, successes = 0, fails = 0;
+
+    while (remaining > 0) {
+      const currentBatch = Math.min(batchSize, remaining);
+      const promises = [];
+      for (let i = 0; i < currentBatch; i++) {
+        const ua = new VMUA().toString();
+        const p = clientLocal.get(target, { headers: { 'User-Agent': ua, Accept: '*/*' } })
+          .then(res => {
+            sent++;
+            const ok = res.status >= 200 && res.status < 400;
+            if (ok) successes++; else fails++;
+            const out = { idx: sent, ok, status: res.status };
+            progressCb(out);
+            return out;
+          })
+          .catch(err => {
+            sent++;
+            fails++;
+            const out = { idx: sent, ok: false, status: err.code || 'ERR', err: err.message };
+            progressCb(out);
+            return out;
+          });
+        promises.push(p);
+      }
+      await Promise.all(promises);
+      remaining -= currentBatch;
+      if (remaining > 0) await new Promise(r => setTimeout(r, batchDelay));
+    }
+
+    return { sent, successes, fails };
+  }
+
+  // ROTA: /api/stresser/config
+  app.get('/api/stresser/config', (req, res) => {
+    res.json({
+      max_volume: VM_STRESS_MAX_VOLUME,
+      batch_size: VM_STRESS_BATCH_SIZE,
+      batch_delay_ms: VM_STRESS_BATCH_DELAY,
+      firebase_enabled: VM_FIREBASE_ENABLED,
+    });
+  });
+
+  // ROTA: POST /api/stresser (execução, sem stream)
+  app.post('/api/stresser', async (req, res) => {
+    try {
+      const { url: rawUrl, volume } = req.body || {};
+      if (!rawUrl) return res.status(400).json({ error: 'url required' });
+
+      const target = vmValidateTargetUrl(rawUrl);
+      let vol = parseInt(volume || 0, 10);
+      if (vol <= 0) return res.status(400).json({ error: 'invalid volume' });
+      if (vol > VM_STRESS_MAX_VOLUME) vol = VM_STRESS_MAX_VOLUME;
+
+      // rate-limit
+      let key;
+      try { key = await vmGetLimiterKey(req); } catch (e) { return res.status(401).json({ error: 'auth_required', message: e.message }); }
+      try { await vmLimiter.consume(key, 1); } catch (e) { return res.status(429).json({ error: 'rate_limited' }); }
+
+      const start = Date.now();
+      const result = await vmRunRequestsInBatches(target, vol);
+      const end = Date.now();
+
+      return res.json({
+        sent: result.sent,
+        sucessos: result.successes,
+        falhas: result.fails,
+        tempo_total_ms: end - start,
+        resultado: result.fails > 0 ? 'POTENCIALMENTE IMPACTADO' : 'ESTÁVEL',
+      });
+    } catch (err) {
+      console.error('VM Stresser POST error:', err && err.message ? err.message : err);
+      return res.status(500).json({ error: err.message || 'internal_error' });
+    }
+  });
+
+  // ROTA: SSE -> /api/stresser/stream
+  app.get('/api/stresser/stream', async (req, res) => {
+    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.flushHeaders();
+
+    try {
+      const targetRaw = req.query.url;
+      let volume = parseInt(req.query.volume || '0', 10);
+      if (!targetRaw || !volume) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'missing_params' })}\n\n`);
+        return res.end();
+      }
+      const target = vmValidateTargetUrl(targetRaw);
+      if (volume > VM_STRESS_MAX_VOLUME) volume = VM_STRESS_MAX_VOLUME;
+
+      // rate-limit
+      let key;
+      try { key = await vmGetLimiterKey(req); } catch (e) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'auth_required', message: e.message })}\n\n`);
+        return res.end();
+      }
+      try { await vmLimiter.consume(key, 1); } catch (e) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'rate_limited' })}\n\n`);
+        return res.end();
+      }
+
+      const start = Date.now();
+      let sentSoFar = 0, successes = 0, fails = 0;
+
+      const progressCb = (pkt) => {
+        if (pkt.ok) successes++; else fails++;
+        sentSoFar = pkt.idx;
+        const data = { idx: pkt.idx, ok: pkt.ok, status: pkt.status, sentSoFar, successes, fails };
+        res.write(`event: packet\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      const heartbeat = setInterval(() => {
+        res.write(`event: heartbeat\ndata: ${JSON.stringify({ sentSoFar, successes, fails })}\n\n`);
+      }, 2000);
+
+      const final = await vmRunRequestsInBatches(target, volume, {}, progressCb);
+      clearInterval(heartbeat);
+      const end = Date.now();
+
+      res.write(`event: done\ndata: ${JSON.stringify({ sent: final.sent, sucessos: final.successes, falhas: final.fails, tempo_total_ms: end - start, resultado: final.fails > 0 ? 'POTENCIALMENTE IMPACTADO' : 'ESTÁVEL' })}\n\n`);
+      return res.end();
+    } catch (err) {
+      console.error('VM Stresser SSE error:', err && err.message ? err.message : err);
+      res.write(`event: error\ndata: ${JSON.stringify({ error: err.message || 'internal_error' })}\n\n`);
+      return res.end();
+    }
+  });
 
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
