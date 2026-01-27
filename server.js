@@ -826,9 +826,58 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-const { RateLimiterMemory } = require('rate-limiter-flexible');
+/**
+ * VMblue – Stresser Tool (isolado)
+ * Express + Firebase Auth + Rate Limit + Batches controlados
+ */
 
-// Configurações do stresser
+const express = require('express');
+const axios = require('axios');
+const https = require('https');
+const UserAgent = require('user-agents');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
+const admin = require('firebase-admin');
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 10000;
+
+/* =====================================================
+   FIREBASE ADMIN
+===================================================== */
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(sa),
+    });
+    console.log('✅ Firebase Admin inicializado');
+  } catch (err) {
+    console.error('❌ Erro Firebase:', err.message);
+  }
+} else {
+  console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT não definido');
+}
+
+async function verifyFirebaseToken(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'NO_TOKEN' });
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(auth.split(' ')[1]);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'INVALID_TOKEN' });
+  }
+}
+
+/* =====================================================
+   CONFIGURAÇÕES DO STRESSER
+===================================================== */
 const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
 const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '2', 10);
 const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '3600', 10);
@@ -838,53 +887,93 @@ const stressLimiter = new RateLimiterMemory({
   duration: STRESS_RATE_DURATION,
 });
 
-// Middleware para autenticação Firebase (reutilize o seu verifyFirebaseToken)
-async function verifyFirebaseToken(req, res, next) {
-  // seu código atual aqui
-}
+/* =====================================================
+   AXIOS CLIENT
+===================================================== */
+const client = axios.create({
+  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+  timeout: 8000,
+  validateStatus: () => true,
+});
 
-// Função para rodar requisições em batches (reutilize seu axios client e user-agent)
+/* =====================================================
+   EXECUTOR EM BATCHES
+===================================================== */
 async function runRequestsInBatches(target, total, batchSize = 20, timeoutMs = 8000) {
-  // sua implementação aqui, usando seu client axios e user-agent
+  const results = [];
+
+  for (let i = 0; i < total; i += batchSize) {
+    const batch = [];
+
+    for (let j = 0; j < batchSize && i + j < total; j++) {
+      const ua = new UserAgent({ deviceCategory: 'desktop' }).toString();
+
+      batch.push(
+        client
+          .get(target, {
+            headers: { 'User-Agent': ua },
+            timeout: timeoutMs,
+          })
+          .then(r => ({ ok: r.status < 500, status: r.status }))
+          .catch(() => ({ ok: false }))
+      );
+    }
+
+    const batchResults = await Promise.all(batch);
+    results.push(...batchResults);
+
+    // Pausa anti-abuso
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  return results;
 }
 
-// Rota exclusiva para o stresser
+/* =====================================================
+   ROTA: /api/stresser
+===================================================== */
 app.get('/api/stresser', verifyFirebaseToken, async (req, res) => {
   try {
     const target = (req.query.url || '').trim();
     let volume = parseInt(req.query.volume || '10', 10);
 
-    if (!target) return res.status(400).json({ error: 'target_missing' });
-    if (!/^https?:\/\//i.test(target)) return res.status(400).json({ error: 'target_must_start_with_http' });
+    if (!target) {
+      return res.status(400).json({ error: 'target_missing' });
+    }
+
+    if (!/^https?:\/\//i.test(target)) {
+      return res.status(400).json({ error: 'target_must_start_with_http' });
+    }
 
     if (isNaN(volume) || volume < 1) volume = 1;
     if (volume > STRESS_MAX_VOLUME) volume = STRESS_MAX_VOLUME;
 
-    // Rate limit por usuário
-    const uid = req.user?.uid || 'anonymous';
+    const uid = req.user.uid;
+
     try {
       await stressLimiter.consume(uid);
     } catch {
       return res.status(429).json({ error: 'rate_limited' });
     }
 
-    // Log básico
     console.log(`[STRESS] uid=${uid} target=${target} volume=${volume}`);
 
     const results = await runRequestsInBatches(target, volume, 20, 8000);
     const success = results.filter(r => r.ok).length;
     const fail = results.length - success;
-    const resultado = fail > Math.floor(volume * 0.3) ? 'VULNERÁVEL' : 'ESTÁVEL';
+
+    const resultado =
+      fail > Math.floor(volume * 0.3) ? 'VULNERÁVEL' : 'ESTÁVEL';
 
     return res.json({
       alvo: target,
       requisicoes: volume,
       sucessos: success,
       falhas: fail,
-      resultado
+      resultado,
     });
   } catch (err) {
-    console.error('STRESS ERROR', err);
+    console.error('STRESS ERROR:', err);
     return res.status(500).json({ error: 'internal_error' });
   }
 });
