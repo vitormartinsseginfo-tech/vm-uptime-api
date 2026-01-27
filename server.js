@@ -412,7 +412,7 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-// === INÍCIO: Snippet seguro VM Stresser (cole após `const app = express()` no server.js) ===
+// === INÍCIO: Snippet mínimo e seguro VM Stresser (cole após `const app = express()`) ===
 (function () {
   if (typeof app === 'undefined') {
     console.error('VM Stresser: coloque este snippet após a declaração `const app = express()`');
@@ -423,38 +423,54 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     return;
   }
 
-  // usa módulos já carregados se existirem, senão require
-  const axiosLocal = (typeof axios !== 'undefined') ? axios : require('axios');
+  // Reutiliza objetos existentes quando possível
+  const axiosLocal = (typeof client !== 'undefined') ? client : (typeof axios !== 'undefined' ? axios : require('axios'));
   const UserAgentLocal = (typeof UserAgent !== 'undefined') ? UserAgent : require('user-agents');
-  const { RateLimiterMemory } = (typeof RateLimiterMemory !== 'undefined') ? { RateLimiterMemory } : require('rate-limiter-flexible');
-  const adminLocal = (typeof admin !== 'undefined') ? admin : (function () {
-    try { return require('firebase-admin'); } catch(e){ return null; }
-  })();
-
-  // Evita recriar clients/limiters se já existirem globalmente
-  if (!global.VMStresserAxios) {
-    global.VMStresserAxios = axiosLocal.create({ timeout: parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10), validateStatus: null });
+  let RateLimiterMemoryLocal;
+  try {
+    RateLimiterMemoryLocal = require('rate-limiter-flexible').RateLimiterMemory;
+  } catch (e) {
+    // fallback simples se lib não instalada
+    RateLimiterMemoryLocal = class {
+      constructor() { this.map = new Map(); }
+      async consume(key) {
+        const now = Date.now();
+        const entry = this.map.get(key) || { ts: now, points: 0 };
+        // permite 1 ponto a cada duration (em segundos) - comportamento conservador
+        if (now - entry.ts > 3600 * 1000) { entry.ts = now; entry.points = 0; }
+        if (entry.points >= 3) throw new Error('rate_limited');
+        entry.points++;
+        this.map.set(key, entry);
+        return;
+      }
+    };
   }
-  const vmClient = global.VMStresserAxios;
+
+  const adminLocal = (typeof admin !== 'undefined') ? admin : (function () { try { return require('firebase-admin'); } catch (e) { return null; } })();
+
+  // Single global client for this snippet if client not provided
+  if (!global.VMStresserAxios && typeof axios !== 'undefined') {
+    global.VMStresserAxios = axiosLocal.create ? axiosLocal : require('axios').create();
+  }
+  const vmClient = global.VMStresserAxios || axiosLocal;
 
   if (!global.VMStresserUA) global.VMStresserUA = UserAgentLocal;
   const VMUA = global.VMStresserUA;
 
   if (!global.VMStresserLimiter) {
-    global.VMStresserLimiter = new RateLimiterMemory({
+    global.VMStresserLimiter = new RateLimiterMemoryLocal({
       points: parseInt(process.env.STRESS_RATE_POINTS || '3', 10),
       duration: parseInt(process.env.STRESS_RATE_DURATION || '3600', 10),
     });
   }
   const vmLimiter = global.VMStresserLimiter;
 
-  // Configs (nomes únicos para evitar conflito)
+  // Configs locais (nomes únicos)
   const VM_STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
   const VM_STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
   const VM_STRESS_BATCH_DELAY = parseInt(process.env.STRESS_BATCH_DELAY || '100', 10);
   const VM_FIREBASE_ENABLED = Boolean(process.env.FIREBASE_SERVICE_ACCOUNT && adminLocal);
 
-  // Helper: valida URL alvo
   function vmValidateTargetUrl(targetUrl) {
     try {
       const u = new URL(targetUrl);
@@ -465,7 +481,6 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     }
   }
 
-  // Helper: obtém chave para rate limiter (UID se Firebase habilitado, senão IP)
   async function vmGetLimiterKey(req) {
     if (VM_FIREBASE_ENABLED && adminLocal) {
       const auth = (req.headers.authorization || '').trim();
@@ -474,15 +489,14 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
       const decoded = await adminLocal.auth().verifyIdToken(token);
       return decoded.uid || decoded.sub || decoded.email || 'fb-user';
     } else {
-      return req.ip || req.connection.remoteAddress || 'anonymous';
+      return req.ip || req.connection?.remoteAddress || 'anonymous';
     }
   }
 
-  // Runner: envia requisições em batches e chama progressCb para cada resposta
   async function vmRunRequestsInBatches(target, total, opts = {}, progressCb = () => {}) {
     const batchSize = opts.batchSize || VM_STRESS_BATCH_SIZE;
     const batchDelay = opts.batchDelay != null ? opts.batchDelay : VM_STRESS_BATCH_DELAY;
-    const clientLocal = axiosLocal.create({ timeout: parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10), validateStatus: null });
+    const clientLocal = (vmClient && vmClient.get) ? vmClient : require('axios').create({ timeout: parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10), validateStatus: null });
 
     let remaining = total;
     let sent = 0, successes = 0, fails = 0;
@@ -492,19 +506,19 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
       const promises = [];
       for (let i = 0; i < currentBatch; i++) {
         const ua = new VMUA().toString();
-        const p = clientLocal.get(target, { headers: { 'User-Agent': ua, Accept: '*/*' } })
+        const p = clientLocal.get(target, { headers: { 'User-Agent': ua, Accept: '*/*' }, validateStatus: null })
           .then(res => {
             sent++;
-            const ok = res.status >= 200 && res.status < 400;
+            const ok = res && res.status >= 200 && res.status < 400;
             if (ok) successes++; else fails++;
-            const out = { idx: sent, ok, status: res.status };
+            const out = { idx: sent, ok, status: res ? res.status : 'NO_RESP' };
             progressCb(out);
             return out;
           })
           .catch(err => {
             sent++;
             fails++;
-            const out = { idx: sent, ok: false, status: err.code || 'ERR', err: err.message };
+            const out = { idx: sent, ok: false, status: err.code || 'ERR', err: err && err.message };
             progressCb(out);
             return out;
           });
@@ -528,7 +542,7 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     });
   });
 
-  // ROTA: POST /api/stresser (execução, sem stream)
+  // ROTA: POST /api/stresser (execução sem stream)
   app.post('/api/stresser', async (req, res) => {
     try {
       const { url: rawUrl, volume } = req.body || {};
