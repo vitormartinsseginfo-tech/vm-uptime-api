@@ -826,9 +826,6 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-// ===== STRESSER (adicionar abaixo das rotas existentes, antes do app.listen) =====
-const { RateLimiterMemory } = require('rate-limiter-flexible');
-
 // Config via env
 const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
 const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '2', 10);
