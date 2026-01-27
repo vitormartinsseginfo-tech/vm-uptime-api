@@ -412,7 +412,8 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-// --------- CONFIG (env vars with sane defaults) ----------
+// --------- CONFIG (valores padrão via ENV) ----------
+const PORT = parseInt(process.env.PORT || '8080', 10);
 const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
 const STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
 const STRESS_REQUEST_TIMEOUT = parseInt(process.env.STRESS_REQUEST_TIMEOUT || '8000', 10);
@@ -420,7 +421,7 @@ const STRESS_BATCH_DELAY = parseInt(process.env.STRESS_BATCH_DELAY || '100', 10)
 const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '3', 10);
 const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '3600', 10);
 
-// Inicializa Firebase Admin se fornecido
+// Inicializa Firebase Admin se FIREBASE_SERVICE_ACCOUNT estiver definida (JSON string)
 let firebaseEnabled = false;
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
@@ -441,27 +442,23 @@ const limiter = new RateLimiterMemory({
   duration: STRESS_RATE_DURATION,
 });
 
-// Axios client para requisições de carga
-const client = axios.create({
-  timeout: STRESS_REQUEST_TIMEOUT,
-  validateStatus: null,
-});
+// Axios client (timeout configurável)
+const baseClient = axios.create({ timeout: STRESS_REQUEST_TIMEOUT, validateStatus: null });
 
-// Util: extrair identificador para rate-limit (uid se Firebase + token, senão IP)
+// Helper: extrair chave para rate limit (UID se Firebase, senão IP)
 async function getLimiterKey(req) {
   if (firebaseEnabled) {
     const auth = (req.headers.authorization || '').trim();
     const token = auth.startsWith('Bearer ') ? auth.split(' ')[1] : (req.query && req.query.token) || null;
     if (!token) throw new Error('Token ausente (Firebase enabled)');
     const decoded = await admin.auth().verifyIdToken(token);
-    return decoded.uid || decoded.sub || decoded.email || decoded.uid;
+    return decoded.uid || decoded.sub || decoded.email || 'fb-user';
   } else {
-    // fallback: usar IP
     return req.ip || req.connection.remoteAddress || 'anonymous';
   }
 }
 
-// Validação de URL alvo
+// Validação simples de URL alvo
 function validateTargetUrl(targetUrl) {
   try {
     const u = new URL(targetUrl);
@@ -472,7 +469,7 @@ function validateTargetUrl(targetUrl) {
   }
 }
 
-// Runner: envia requisições em batches, chama progressCb por pacote
+// Runner: envia requisições em batches e chama progressCb para cada resposta
 async function runRequestsInBatches(target, total, opts = {}, progressCb = () => {}) {
   const batchSize = opts.batchSize || STRESS_BATCH_SIZE;
   const timeoutMs = opts.timeoutMs || STRESS_REQUEST_TIMEOUT;
@@ -487,6 +484,7 @@ async function runRequestsInBatches(target, total, opts = {}, progressCb = () =>
   while (remaining > 0) {
     const currentBatch = Math.min(batchSize, remaining);
     const promises = [];
+
     for (let i = 0; i < currentBatch; i++) {
       const ua = new UserAgent().toString();
       const p = clientLocal.get(target, { headers: { 'User-Agent': ua, Accept: '*/*' } })
@@ -507,6 +505,7 @@ async function runRequestsInBatches(target, total, opts = {}, progressCb = () =>
         });
       promises.push(p);
     }
+
     await Promise.all(promises);
     remaining -= currentBatch;
     if (remaining > 0) await new Promise(r => setTimeout(r, batchDelay));
@@ -515,7 +514,7 @@ async function runRequestsInBatches(target, total, opts = {}, progressCb = () =>
   return { sent, successes, fails };
 }
 
-// Rota: /api/stresser/config (retorna limites)
+// Rota: GET /api/stresser/config -> retorna limites e flags
 app.get('/api/stresser/config', (req, res) => {
   res.json({
     max_volume: STRESS_MAX_VOLUME,
@@ -529,7 +528,7 @@ app.get('/api/stresser/config', (req, res) => {
 });
 
 // Rota: POST /api/stresser  (execução final, sem stream)
-// Body: { url: "...", volume: 100 }
+// Body JSON: { "url": "https://example.com", "volume": 100 }
 app.post('/api/stresser', async (req, res) => {
   try {
     const { url: rawUrl, volume } = req.body || {};
@@ -540,7 +539,7 @@ app.post('/api/stresser', async (req, res) => {
     if (vol <= 0) return res.status(400).json({ error: 'invalid volume' });
     if (vol > STRESS_MAX_VOLUME) vol = STRESS_MAX_VOLUME;
 
-    // limiter
+    // rate-limiter
     let key;
     try { key = await getLimiterKey(req); } catch (e) { return res.status(401).json({ error: 'auth_required', message: e.message }); }
     try { await limiter.consume(key, 1); } catch (e) { return res.status(429).json({ error: 'rate_limited' }); }
@@ -562,7 +561,7 @@ app.post('/api/stresser', async (req, res) => {
   }
 });
 
-// Rota: SSE stream -> /api/stresser/stream?url=...&volume=... (&token= when firebase enabled)
+// Rota: SSE stream -> /api/stresser/stream?url=...&volume=... (&token=... quando firebase enabled)
 app.get('/api/stresser/stream', async (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.flushHeaders();
@@ -574,10 +573,11 @@ app.get('/api/stresser/stream', async (req, res) => {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'missing_params' })}\n\n`);
       return res.end();
     }
+
     const target = validateTargetUrl(targetRaw);
     if (volume > STRESS_MAX_VOLUME) volume = STRESS_MAX_VOLUME;
 
-    // limiter
+    // rate-limiter
     let key;
     try { key = await getLimiterKey(req); } catch (e) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'auth_required', message: e.message })}\n\n`);
