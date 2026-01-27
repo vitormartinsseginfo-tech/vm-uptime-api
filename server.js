@@ -381,7 +381,7 @@ const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
 const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '100', 10);   // 100 requisições
 const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '60', 10); // por 60 segundos (1 minuto)
 const STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
-const STRESS_BATCH_INTERVAL_MS = parseInt(process.env.STRESS_BATCH_INTERVAL_MS || '500', 10);
+const STRESS_BATCH_INTERVAL_MS = parseInt(process.env.STRESS_BATCH_INTERVAL_MS || '1000', 10);
 const STRESS_MAX_CONCURRENCY = parseInt(process.env.STRESS_MAX_CONCURRENCY || '5', 10);
 
   // Allowlist (CSV)
