@@ -412,20 +412,6 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-const express = require('express');
-const axios = require('axios');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const net = require('net');
-const UserAgent = require('user-agents');
-
-const app = express();
-app.use(express.json());
-
-const PORT = process.env.PORT || 10000;
-const DATA_FILE = path.join(__dirname, 'data.json');
-
 // --- CONFIGURAÇÃO DE CORS (Aceita subdomínios de vmblue e vm-security) ---
 app.use((req, res, next) => {
   const origin = req.headers.origin;
