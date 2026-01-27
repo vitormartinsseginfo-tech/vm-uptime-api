@@ -361,19 +361,180 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
   console.log('✅ VMIntelligence carregado com sucesso.');
 })();
 
-// --- TENTAR CARREGAR STRESSER (opcional, modular) ---
-try {
-  // se existir stresser.js que exporta função registerStresser(app, deps)
-  const stresserPath = path.join(__dirname, 'stresser.js');
-  if (fs.existsSync(stresserPath)) {
-    require(stresserPath)(app, { client, UserAgent, verifyFirebaseToken });
-    console.log('Stresser module loaded from stresser.js');
-  } else {
-    console.log('stresser.js não encontrado — pulando.');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
+
+module.exports = function registerStresser(app, deps = {}) {
+  const axiosClient = deps.client || require('axios').create({ timeout: 15000 });
+  const UserAgent = deps.UserAgent || require('user-agents');
+  const verifyFirebaseToken = deps.verifyFirebaseToken || ((req, res, next) => next());
+
+  // Configuráveis via ENV
+  const STRESS_MAX_VOLUME = parseInt(process.env.STRESS_MAX_VOLUME || '1000', 10);
+  const STRESS_RATE_POINTS = parseInt(process.env.STRESS_RATE_POINTS || '2', 10);
+  const STRESS_RATE_DURATION = parseInt(process.env.STRESS_RATE_DURATION || '3600', 10);
+  const STRESS_BATCH_SIZE = parseInt(process.env.STRESS_BATCH_SIZE || '20', 10);
+  const STRESS_BATCH_INTERVAL_MS = parseInt(process.env.STRESS_BATCH_INTERVAL_MS || '500', 10);
+  const STRESS_MAX_CONCURRENCY = parseInt(process.env.STRESS_MAX_CONCURRENCY || '5', 10);
+
+  // Allowlist de hosts (CSV) - EX.: "localhost,example.com,api.vm-security.com"
+  const ALLOWED_HOSTS = (process.env.STRESS_ALLOWED_HOSTS || 'localhost,127.0.0.1').split(',')
+    .map(s => s.trim()).filter(Boolean);
+
+  // Gate global (precaução): só roda se ALLOW_STRESS === 'yes'
+  const ALLOW_STRESS = (process.env.ALLOW_STRESS === 'yes');
+
+  // Rate limiter por usuário (em memória)
+  const stressLimiter = new RateLimiterMemory({
+    points: STRESS_RATE_POINTS,
+    duration: STRESS_RATE_DURATION
+  });
+
+  function isHostAllowed(urlStr) {
+    try {
+      const u = new URL(urlStr);
+      const host = u.hostname.toLowerCase();
+      if (ALLOWED_HOSTS.includes('*')) return true;
+      return ALLOWED_HOSTS.some(ah => {
+        ah = ah.toLowerCase();
+        if (ah.startsWith('*.')) {
+          return host === ah.slice(2) || host.endsWith('.' + ah.slice(2));
+        }
+        return host === ah || host.endsWith('.' + ah);
+      });
+    } catch (e) {
+      return false;
+    }
   }
-} catch (e) {
-  console.warn('Erro ao carregar stresser.js:', e && e.message);
-}
+
+  // Função que executa requisições em batches com intervalo entre batches
+  async function runRequestsInBatches(target, total, batchSize = STRESS_BATCH_SIZE, timeoutMs = 8000) {
+    const results = [];
+    const rounds = Math.ceil(total / batchSize);
+
+    // Concurrency safety: limit concurrent requests inside a batch to STRESS_MAX_CONCURRENCY
+    for (let r = 0; r < rounds; r++) {
+      const startIndex = r * batchSize;
+      const currentBatchSize = Math.min(batchSize, total - startIndex);
+      const tasks = [];
+      for (let i = 0; i < currentBatchSize; i++) {
+        const idx = startIndex + i;
+        tasks.push((async () => {
+          const start = Date.now();
+          try {
+            const resp = await axiosClient.request({
+              url: target,
+              method: 'GET',
+              timeout: timeoutMs,
+              headers: {
+                'User-Agent': (new UserAgent({ deviceCategory: 'desktop' }).toString()),
+                'Accept': '*/*'
+              },
+              validateStatus: () => true
+            });
+            const ms = Date.now() - start;
+            return { index: idx, status: resp.status, ok: resp.status >= 200 && resp.status < 400, ms };
+          } catch (err) {
+            const ms = Date.now() - start;
+            return { index: idx, error: err.message || 'request_error', ms };
+          }
+        })());
+        // throttle starting tasks to avoid bursting too many promises at once
+        if (tasks.length >= STRESS_MAX_CONCURRENCY) {
+          const settled = await Promise.allSettled(tasks.splice(0, tasks.length));
+          settled.forEach(s => {
+            if (s.status === 'fulfilled') results.push(s.value);
+            else results.push({ error: s.reason?.message || 'task_rejected' });
+          });
+        }
+      }
+      // flush remaining tasks
+      if (tasks.length) {
+        const settled = await Promise.allSettled(tasks);
+        settled.forEach(s => {
+          if (s.status === 'fulfilled') results.push(s.value);
+          else results.push({ error: s.reason?.message || 'task_rejected' });
+        });
+      }
+
+      // intervalo entre batches (proteção)
+      if (r < rounds - 1) {
+        await new Promise(resolve => setTimeout(resolve, STRESS_BATCH_INTERVAL_MS));
+      }
+    }
+
+    return results;
+  }
+
+  // Health + info
+  app.get('/api/stresser/health', (req, res) => {
+    res.json({
+      ok: true,
+      allowStress: ALLOW_STRESS,
+      allowedHosts: ALLOWED_HOSTS,
+      maxVolume: STRESS_MAX_VOLUME,
+      ratePoints: STRESS_RATE_POINTS,
+      rateDuration: STRESS_RATE_DURATION
+    });
+  });
+
+  // Rota principal (GET e POST suportados). Recomenda-se POST em produção.
+  app.all('/api/stresser', verifyFirebaseToken, async (req, res) => {
+    if (!ALLOW_STRESS) {
+      return res.status(403).json({ error: 'STRESS_DISABLED', message: 'Stress tests are disabled on this instance.' });
+    }
+
+    const source = req.method === 'GET' ? req.query : req.body || {};
+    let target = (source.url || source.target || '').trim();
+    let volume = parseInt(source.volume || source.requests || '10', 10);
+
+    if (!target) return res.status(400).json({ error: 'target_missing' });
+    if (!/^https?:\/\//i.test(target)) return res.status(400).json({ error: 'target_must_start_with_http' });
+
+    if (isNaN(volume) || volume < 1) volume = 1;
+    if (volume > STRESS_MAX_VOLUME) volume = STRESS_MAX_VOLUME;
+
+    // Rate limit por usuário (uid do token)
+    const uid = req.user?.uid || (req.ip || 'unknown');
+    try {
+      await stressLimiter.consume(uid);
+    } catch (rlErr) {
+      return res.status(429).json({ error: 'rate_limited' });
+    }
+
+    // Allowlist check
+    if (!isHostAllowed(target)) {
+      return res.status(403).json({ error: 'host_not_allowed', message: `Host não permitido. Allowed: ${ALLOWED_HOSTS.join(', ')}` });
+    }
+
+    console.log(`[STRESS] uid=${uid} target=${target} volume=${volume}`);
+
+    try {
+      const results = await runRequestsInBatches(target, volume, STRESS_BATCH_SIZE, 8000);
+      const success = results.filter(r => r.ok).length;
+      const fail = results.length - success;
+      const resultado = fail > Math.floor(volume * 0.3) ? 'VULNERÁVEL' : 'ESTÁVEL';
+
+      return res.json({
+        alvo: target,
+        requisicoes: volume,
+        sucessos: success,
+        falhas: fail,
+        resultado,
+        sample: results.slice(0, 200)
+      });
+    } catch (err) {
+      console.error('STRESS ERROR', err);
+      return res.status(500).json({ error: 'internal_error', details: err.message });
+    }
+  });
+
+  // Expor allowlist para inspeção
+  app.get('/api/stresser/allowed-hosts', (req, res) => {
+    res.json({ allowedHosts: ALLOWED_HOSTS });
+  });
+
+  console.log('Stresser safe module registered.');
+};
 
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
