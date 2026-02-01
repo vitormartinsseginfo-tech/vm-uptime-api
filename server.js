@@ -103,49 +103,169 @@ app.all(['/scan', '/api/scan'], async (req, res) => {
 });
 
 // ============================================================
-// 3. FERRAMENTA: 24x7 (MONITOR DE UPTIME)
+// 3. FERRAMENTA: 24x7 (MONITOR DE UPTIME) - VERSÃO PRO
 // ============================================================
+
+// Estrutura de dados melhorada
+const initSiteData = () => ({
+  id: '',
+  url: '',
+  status: 'unknown',
+  response_ms: 0,
+  last_check: null,
+  http_status: 0,
+  ssl: null,
+  ip: null,
+  page_size: 0,
+  content_type: '',
+  history: [], // Últimas 24h de checks
+  uptime_24h: 100,
+  downtime_count: 0,
+  last_offline: null
+});
+
+// GET - Listar sites com dados completos
 app.get(['/sites', '/api/sites'], (req, res) => {
   res.json(DB.sites.map(s => ({
     id: s.id,
     url: s.url,
-    status: s.status || 'offline',
+    status: s.status || 'unknown',
     response_ms: s.response_ms || 0,
-    last_check: s.last_check || new Date().toISOString()
+    last_check: s.last_check || null,
+    http_status: s.http_status || 0,
+    ssl: s.ssl || null,
+    ip: s.ip || null,
+    page_size: s.page_size || 0,
+    content_type: s.content_type || '',
+    history: s.history || [],
+    uptime_24h: s.uptime_24h || 100,
+    downtime_count: s.downtime_count || 0,
+    last_offline: s.last_offline || null
   })));
 });
 
+// POST - Adicionar novo site
 app.post(['/sites', '/api/sites'], async (req, res) => {
   const { url } = req.body || {};
   if (!url) return res.status(400).json({ error: 'URL obrigatória' });
-  const site = { id: Date.now().toString(36), url, status: 'online', response_ms: 50, last_check: new Date().toISOString() };
+  
+  const site = {
+    ...initSiteData(),
+    id: Date.now().toString(36),
+    url: url.trim(),
+    last_check: new Date().toISOString()
+  };
+  
   DB.sites.push(site);
   saveData();
+  
+  // Fazer primeiro check imediatamente
+  checkSite(site);
+  
   res.json(site);
 });
 
+// DELETE - Remover site
 app.delete(['/sites/:id', '/api/sites/:id'], (req, res) => {
   DB.sites = DB.sites.filter(s => s.id !== req.params.id);
   saveData();
   res.json({ ok: true });
 });
 
+// POST - Forçar verificação manual
 app.all(['/check-now', '/api/check-now'], async (req, res) => {
-  const WORKER_URL = process.env.UPTIME_WORKER_URL || 'https://uptime24x7.vmblue.com.br';
-  for (const s of DB.sites) {
-    try {
-      const resp = await client.get(`${WORKER_URL}?url=${encodeURIComponent(s.url)}`);
-      s.status = resp.data?.status || 'unknown';
-      s.response_ms = resp.data?.ms || 0;
-      s.last_check = new Date().toISOString();
-    } catch (e) {
-      s.status = 'offline';
-      s.response_ms = 0;
-    }
+  const results = [];
+  for (const site of DB.sites) {
+    const result = await checkSite(site);
+    results.push(result);
   }
   saveData();
-  res.json({ ok: true });
+  res.json({ ok: true, results });
 });
+
+// GET - Histórico de um site específico
+app.get(['/sites/:id/history', '/api/sites/:id/history'], (req, res) => {
+  const site = DB.sites.find(s => s.id === req.params.id);
+  if (!site) return res.status(404).json({ error: 'Site não encontrado' });
+  res.json({ history: site.history || [] });
+});
+
+// Função auxiliar para verificar um site
+async function checkSite(site) {
+  const WORKER_URL = process.env.UPTIME_WORKER_URL || 'https://uptime24x7.vmblue.workers.dev';
+  
+  try {
+    const resp = await client.get(`${WORKER_URL}?url=${encodeURIComponent(site.url)}`, {
+      timeout: 30000
+    });
+    
+    const data = resp.data || {};
+    
+    // Atualizar dados principais
+    site.status = data.status || 'unknown';
+    site.response_ms = data.ms || 0;
+    site.http_status = data.http_status || 0;
+    site.ssl = data.ssl || null;
+    site.ip = data.ip || null;
+    site.page_size = data.page_size || 0;
+    site.content_type = data.content_type || '';
+    site.last_check = new Date().toISOString();
+    
+    // Adicionar ao histórico
+    if (!site.history) site.history = [];
+    site.history.push({
+      timestamp: site.last_check,
+      status: site.status,
+      response_ms: site.response_ms,
+      http_status: site.http_status
+    });
+    
+    // Manter apenas últimas 24h (288 checks de 5min)
+    if (site.history.length > 288) {
+      site.history = site.history.slice(-288);
+    }
+    
+    // Calcular uptime 24h
+    const onlineChecks = site.history.filter(h => h.status === 'online').length;
+    site.uptime_24h = site.history.length > 0 
+      ? ((onlineChecks / site.history.length) * 100).toFixed(2)
+      : 100;
+    
+    // Contar downtimes
+    if (site.status === 'offline') {
+      site.downtime_count = (site.downtime_count || 0) + 1;
+      site.last_offline = site.last_check;
+    }
+    
+    return { id: site.id, status: site.status, ms: site.response_ms };
+    
+  } catch (e) {
+    site.status = 'offline';
+    site.response_ms = 0;
+    site.last_check = new Date().toISOString();
+    site.downtime_count = (site.downtime_count || 0) + 1;
+    site.last_offline = site.last_check;
+    
+    if (!site.history) site.history = [];
+    site.history.push({
+      timestamp: site.last_check,
+      status: 'offline',
+      response_ms: 0,
+      http_status: 0
+    });
+    
+    return { id: site.id, status: 'offline', error: e.message };
+  }
+}
+
+// Verificação automática a cada 5 minutos
+setInterval(async () => {
+  console.log('[24x7] Verificando sites automaticamente...');
+  for (const site of DB.sites) {
+    await checkSite(site);
+  }
+  saveData();
+}, 5 * 60 * 1000); // 5 minutos
 
 // --- NOVA FERRAMENTA: PORT SCANNER ---
 app.get('/api/portcheck', async (req, res) => {
