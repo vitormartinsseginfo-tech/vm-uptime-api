@@ -54,6 +54,22 @@ const client = axios.create({
   timeout: 15000
 });
 
+// Rota para BUSCAR os sites do banco de dados
+app.get('/api/sites', (req, res) => {
+    res.json(DB.sites || []);
+});
+
+// Rota para SALVAR os sites no banco de dados
+app.post('/api/sites', (req, res) => {
+    const { sites } = req.body;
+    if (!Array.isArray(sites)) {
+        return res.status(400).json({ error: 'Formato inválido' });
+    }
+    DB.sites = sites;
+    saveData(); // Salva no arquivo data.json
+    res.json({ success: true });
+});
+
 // ============================================================
 // 1. FERRAMENTA: HUNTER (CONTATOS)
 // ============================================================
