@@ -1,5 +1,3 @@
-// server.js - VM Security API Unificada (cleaned)
-// Dependências
 const express = require('express');
 const axios = require('axios');
 const https = require('https');
@@ -9,12 +7,17 @@ const net = require('net');
 const UserAgent = require('user-agents');
 const adminModuleName = 'firebase-admin'; // require só se configurado
 
-// Inicialização básica
+
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 const DATA_FILE = path.join(__dirname, 'data.json');
+
+
+app.get('/', (req, res) => {
+  res.status(200).send('API de Monitoramento Online ✅');
+});
 
 // --- CONFIGURAÇÃO DE CORS (Aceita subdomínios de vmblue e vm-security) ---
 app.use((req, res, next) => {
