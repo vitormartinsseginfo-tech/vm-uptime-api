@@ -511,5 +511,101 @@ const STRESS_MAX_CONCURRENCY = parseInt(process.env.STRESS_MAX_CONCURRENCY || '5
   console.log('Stresser inline registered (ALLOW_STRESS=' + (ALLOW_STRESS ? 'yes' : 'no') + ').');
 })();
 
+// --- BRAND PROTECTION (rota a ser adicionada ao server.js) ---
+app.get('/api/brand-protection', async (req, res) => {
+  try {
+    let domain = (req.query.domain || '').trim();
+    if (!domain) return res.status(400).json({ error: 'Domínio é obrigatório' });
+
+    // Normaliza: remove protocolo e caminho
+    domain = domain.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+    const parts = domain.split('.');
+    if (parts.length < 2) return res.status(400).json({ error: 'Domínio inválido' });
+
+    const name = parts[0];
+    const tld = parts.slice(1).join('.');
+
+    // Variações comuns (adicione mais se quiser)
+    const variations = [
+      `login-${name}.${tld}`,
+      `${name}-suporte.${tld}`,
+      `${name}-financeiro.${tld}`,
+      `${name}oficial.${tld}`,
+      `atendimento-${name}.${tld}`,
+      `${name}-seguro.${tld}`,
+      `portal-${name}.${tld}`,
+      `${name}app.${tld}`,
+      `painel-${name}.${tld}`,
+      `admin-${name}.${tld}`,
+      `${name}-www.${tld}`,
+      `${name}-online.${tld}`
+    ];
+
+    // Headers realistas para reduzir bloqueios simples
+    const defaultHeaders = {
+      'User-Agent': 'Mozilla/5.0 (compatible; VMBrandChecker/1.0; +https://vmblue.com.br)',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    };
+
+    // Faz cheque paralelo (HEAD em https primeiro, fallback para http)
+    const checks = variations.map(async (v) => {
+      const result = { domain: v, status: 'INATIVO', httpStatus: null, note: 'Seguro' };
+
+      // tenta HTTPS HEAD
+      try {
+        const r = await axios.request({
+          url: `https://${v}`,
+          method: 'HEAD',
+          timeout: 5000,
+          maxRedirects: 5,
+          headers: defaultHeaders,
+          validateStatus: () => true
+        });
+        result.httpStatus = r.status;
+        if (r.status >= 200 && r.status < 400) {
+          result.status = 'ATIVO';
+          result.note = 'CRÍTICO: Site suspeito online!';
+          return result;
+        }
+      } catch (e) {
+        // ignora e tenta http abaixo
+      }
+
+      // tenta HTTP HEAD como fallback
+      try {
+        const r2 = await axios.request({
+          url: `http://${v}`,
+          method: 'HEAD',
+          timeout: 5000,
+          maxRedirects: 5,
+          headers: defaultHeaders,
+          validateStatus: () => true
+        });
+        result.httpStatus = r2.status;
+        if (r2.status >= 200 && r2.status < 400) {
+          result.status = 'ATIVO';
+          result.note = 'CRÍTICO: Site suspeito online!';
+          return result;
+        }
+      } catch (e) {
+        // permanece INATIVO
+      }
+
+      return result;
+    });
+
+    const results = await Promise.all(checks);
+
+    return res.json({
+      target: domain,
+      checkedCount: variations.length,
+      results
+    });
+  } catch (err) {
+    console.error('brand-protection error:', err);
+    return res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
 // --- INICIALIZAÇÃO ---
 app.listen(PORT, () => console.log(`🚀 VM Security API Unificada rodando na porta ${PORT}`));
