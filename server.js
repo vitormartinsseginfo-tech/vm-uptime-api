@@ -7,6 +7,7 @@ const net = require('net');
 const UserAgent = require('user-agents');
 const adminModuleName = 'firebase-admin'; // require só se configurado
 
+const client = axios.create({ timeout: 15000 });
 
 const app = express();
 app.use(express.json());
