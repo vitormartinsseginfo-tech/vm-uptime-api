@@ -216,104 +216,180 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
 
   const VT_API_KEY = process.env.VT_API_KEY || '';
   const ABUSE_API_KEY = process.env.ABUSE_API_KEY || '';
-  // Defina client corretamente
-  const client = axios; // <- importante: antes usava client sem definição
+  const client = axios; // garante que client exista
+
+  // simple in-memory cache to reduce repeated API calls within TTL
+  const cacheLocal = new Map(); // key -> { ts, value }
+  const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
 
   const isIP = s => /^(?:\d{1,3}\.){3}\d{1,3}$/.test((s || '').trim());
   const isHash = s => /^[a-fA-F0-9]{32,64}$/.test((s || '').trim());
 
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function getCache(key) {
+    const e = cacheLocal.get(key);
+    if (!e) return null;
+    if (Date.now() - e.ts > CACHE_TTL_MS) { cacheLocal.delete(key); return null; }
+    return e.value;
+  }
+  function setCache(key, value) {
+    cacheLocal.set(key, { ts: Date.now(), value });
+  }
+
+  // retry helper for transient errors (exponential backoff)
+  async function retry(fn, attempts = 3, initialDelay = 500) {
+    let delay = initialDelay;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        const status = err && err.response && err.response.status;
+        // if non-transient status, rethrow immediately
+        if (status && status !== 429) throw err;
+        if (i === attempts - 1) throw err;
+        console.log(`Retry ${i+1}/${attempts} after ${delay}ms due to ${status || err.message}`);
+        await sleep(delay);
+        delay *= 2;
+      }
+    }
+  }
+
+  // VirusTotal helpers (wrap responses)
   async function vtGetIP(ip) {
+    const cacheKey = `vt:ip:${ip}`;
+    const cached = getCache(cacheKey);
+    if (cached) return { ok: true, data: cached, fromCache: true };
+
     try {
-      const res = await client.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, { headers: { 'x-apikey': VT_API_KEY } });
+      const res = await client.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, {
+        headers: { 'x-apikey': VT_API_KEY }
+      });
       console.log('VT IP response for', ip, 'size:', JSON.stringify(res.data).length);
-      return { ok: true, data: res.data };
+      setCache(cacheKey, res.data);
+      return { ok: true, data: res.data, status: res.status };
     } catch (err) {
       console.error('VT IP error for', ip, err && err.response ? err.response.status : err.message);
-      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+      return { ok: false, error: err.response ? err.response.data : err.message, status: err.response ? err.response.status : 500 };
     }
   }
+
   async function vtGetDomain(domain) {
+    const cacheKey = `vt:domain:${domain}`;
+    const cached = getCache(cacheKey);
+    if (cached) return { ok: true, data: cached, fromCache: true };
+
     try {
-      const res = await client.get(`https://www.virustotal.com/api/v3/domains/${domain}`, { headers: { 'x-apikey': VT_API_KEY } });
+      const res = await client.get(`https://www.virustotal.com/api/v3/domains/${domain}`, {
+        headers: { 'x-apikey': VT_API_KEY }
+      });
       console.log('VT Domain response for', domain, 'size:', JSON.stringify(res.data).length);
-      return { ok: true, data: res.data };
+      setCache(cacheKey, res.data);
+      return { ok: true, data: res.data, status: res.status };
     } catch (err) {
       console.error('VT Domain error for', domain, err && err.response ? err.response.status : err.message);
-      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+      return { ok: false, error: err.response ? err.response.data : err.message, status: err.response ? err.response.status : 500 };
     }
   }
+
   async function vtGetFile(hash) {
+    const cacheKey = `vt:file:${hash}`;
+    const cached = getCache(cacheKey);
+    if (cached) return { ok: true, data: cached, fromCache: true };
+
     try {
-      const res = await client.get(`https://www.virustotal.com/api/v3/files/${hash}`, { headers: { 'x-apikey': VT_API_KEY } });
+      const res = await client.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
+        headers: { 'x-apikey': VT_API_KEY }
+      });
       console.log('VT File response for', hash, 'size:', JSON.stringify(res.data).length);
-      return { ok: true, data: res.data };
+      setCache(cacheKey, res.data);
+      return { ok: true, data: res.data, status: res.status };
     } catch (err) {
       console.error('VT File error for', hash, err && err.response ? err.response.status : err.message);
-      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+      return { ok: false, error: err.response ? err.response.data : err.message, status: err.response ? err.response.status : 500 };
     }
   }
+
+  // AbuseIPDB helper (with caching)
   async function abuseCheckIP(ip) {
+    const cacheKey = `abuse:ip:${ip}`;
+    const cached = getCache(cacheKey);
+    if (cached) return { ok: true, data: cached, fromCache: true };
+
     try {
       const res = await client.get('https://api.abuseipdb.com/api/v2/check', {
         params: { ipAddress: ip, maxAgeInDays: 90 },
         headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
       });
       console.log('AbuseIPDB response for', ip, 'size:', JSON.stringify(res.data).length);
-      return { ok: true, data: res.data.data };
+      setCache(cacheKey, res.data.data);
+      return { ok: true, data: res.data.data, status: res.status };
     } catch (err) {
-      console.error('AbuseIPDB error for', ip, err && err.response ? err.response.status : err.message);
-      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'abuse_error') };
+      const status = err.response ? err.response.status : 500;
+      console.error('AbuseIPDB error for', ip, status);
+      return { ok: false, error: err.response ? err.response.data : err.message, status };
     }
   }
 
+  // classification: returns { malicious, indeterminate, reasons, status }
   function classifyResult({ vtResult, abuseResult }) {
-    // vtResult and abuseResult follow the { ok: boolean, data: ... } shape
     const reasons = [];
     let malicious = false;
     let indeterminate = false;
 
-    if (!abuseResult || abuseResult.ok === false) {
-      // se falhou na consulta, marque indeterminado
-      indeterminate = true;
-      if (abuseResult && abuseResult.error) reasons.push(`AbuseIPDB error: ${JSON.stringify(abuseResult.error).slice(0,120)}`);
-    } else {
-      const abuse = abuseResult.data;
-      if (abuse && Number(abuse.abuseConfidenceScore || 0) >= 10) {
+    // AbuseIPDB info (if available)
+    if (abuseResult && abuseResult.ok) {
+      const a = abuseResult.data;
+      if (a && Number(a.abuseConfidenceScore || 0) >= 10) {
         malicious = true;
-        reasons.push(`AbuseIPDB score ${abuse.abuseConfidenceScore}`);
+        reasons.push(`AbuseIPDB score ${a.abuseConfidenceScore}`);
+      } else {
+        reasons.push(`AbuseIPDB score ${a ? a.abuseConfidenceScore : 'N/A'}`);
       }
+    } else {
+      reasons.push('AbuseIPDB unavailable or rate-limited');
     }
 
-    if (!vtResult || vtResult.ok === false) {
-      indeterminate = true;
-      if (vtResult && vtResult.error) reasons.push(`VT error: ${JSON.stringify(vtResult.error).slice(0,120)}`);
-    } else {
+    // VirusTotal primary check
+    if (vtResult && vtResult.ok) {
       const vt = vtResult.data;
       if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
-        const s = vt.data.attributes.last_analysis_stats;
-        if (Number(s.malicious || 0) > 0) {
+        const stats = vt.data.attributes.last_analysis_stats;
+        const detections = Number(stats.malicious || 0);
+        if (detections > 0) {
           malicious = true;
-          reasons.push(`VirusTotal: ${s.malicious} detections`);
+          reasons.push(`VirusTotal detections: ${detections}`);
+        } else {
+          reasons.push('VirusTotal detections: 0');
         }
+      } else {
+        indeterminate = true;
+        reasons.push('VirusTotal: unexpected response shape');
       }
+    } else {
+      indeterminate = true;
+      reasons.push('VirusTotal query failed');
     }
 
-    // Prioridade: se malicioso => malicioso; se não malicioso e indeterminado => indeterminado; caso contrário clean
-    if (malicious) return { malicious: true, indeterminate: false, reasons };
-    if (indeterminate) return { malicious: false, indeterminate: true, reasons };
-    return { malicious: false, indeterminate: false, reasons };
+    if (malicious) return { malicious: true, indeterminate: false, reasons, status: 'MALICIOSO' };
+    if (indeterminate) return { malicious: false, indeterminate: true, reasons, status: 'ERRO/INDETERMINADO' };
+    return { malicious: false, indeterminate: false, reasons, status: 'LIMPO' };
   }
 
+  // Routes
   app.get('/analyze', async (req, res) => {
     const target = (req.query.target || '').trim();
     if (!target) return res.status(400).json({ error: 'Alvo necessário' });
+
     try {
       let result = { target, type: 'unknown', vt: null, abuse: null };
       if (isIP(target)) {
         result.type = 'ip';
-        const [a, v] = await Promise.all([abuseCheckIP(target), vtGetIP(target)]);
-        result.abuse = a;
-        result.vt = v;
+        // use retry for abuse to reduce transient 429s
+        const abuse = await retry(() => abuseCheckIP(target)).catch(err => ({ ok: false, error: err }));
+        const vt = await vtGetIP(target);
+        result.abuse = abuse;
+        result.vt = vt;
       } else if (isHash(target)) {
         result.type = 'hash';
         result.vt = await vtGetFile(target);
@@ -329,28 +405,51 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     }
   });
 
+  // POST /batch - processes array of targets
   app.post('/batch', async (req, res) => {
     const targets = Array.isArray(req.body.targets) ? req.body.targets : [];
     const results = [];
+
     for (const t of targets) {
       try {
+        console.log('Processing target:', t);
         let entry = { target: t, classification: { malicious: false, indeterminate: false }, raw: null };
+
         if (isIP(t)) {
-          const [a, v] = await Promise.all([abuseCheckIP(t), vtGetIP(t)]);
+          // abuse with retry (to mitigate transient 429), vt without retry
+          const abusePromise = retry(() => abuseCheckIP(t)).catch(err => {
+            console.error('Abuse retry final failed for', t, err && err.response ? err.response.status : err.message);
+            return { ok: false, error: err.response ? err.response.data : err.message, status: err.response ? err.response.status : 500 };
+          });
+
+          const vtPromise = vtGetIP(t);
+
+          const settled = await Promise.allSettled([abusePromise, vtPromise]);
+          const a = settled[0].status === 'fulfilled' ? settled[0].value : { ok: false, error: settled[0].reason };
+          const v = settled[1].status === 'fulfilled' ? settled[1].value : { ok: false, error: settled[1].reason };
+
           entry.raw = { abuse: a, vt: v };
           entry.classification = classifyResult({ vtResult: v, abuseResult: a });
+
+        } else if (isHash(t)) {
+          const v = await vtGetFile(t);
+          entry.raw = { vt: v };
+          entry.classification = classifyResult({ vtResult: v, abuseResult: null });
         } else {
-          // opcional: tratar domains/hashes em batch se quiser
-          entry.note = 'Tipo nao-IP - pulado';
+          const v = await vtGetDomain(t);
+          entry.raw = { vt: v };
+          entry.classification = classifyResult({ vtResult: v, abuseResult: null });
         }
+
         results.push(entry);
-        await new Promise(r => setTimeout(r, 400));
+        // increase delay to reduce 429s from shared-hosted IPs (Render)
+        await sleep(1500);
       } catch (e) {
         console.error('Batch item error for', t, e);
         results.push({ target: t, error: e.message || String(e) });
       }
     }
-    // Retorne também counts e detalhes de erros
+
     res.json({
       malicious: results.filter(r => r.classification && r.classification.malicious),
       indeterminate: results.filter(r => r.classification && r.classification.indeterminate),
