@@ -216,46 +216,92 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
 
   const VT_API_KEY = process.env.VT_API_KEY || '';
   const ABUSE_API_KEY = process.env.ABUSE_API_KEY || '';
-  const cacheLocal = new Map();
+  // Defina client corretamente
+  const client = axios; // <- importante: antes usava client sem definição
 
   const isIP = s => /^(?:\d{1,3}\.){3}\d{1,3}$/.test((s || '').trim());
   const isHash = s => /^[a-fA-F0-9]{32,64}$/.test((s || '').trim());
 
   async function vtGetIP(ip) {
-    const res = await client.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, { headers: { 'x-apikey': VT_API_KEY } });
-    return res.data;
+    try {
+      const res = await client.get(`https://www.virustotal.com/api/v3/ip_addresses/${ip}`, { headers: { 'x-apikey': VT_API_KEY } });
+      console.log('VT IP response for', ip, 'size:', JSON.stringify(res.data).length);
+      return { ok: true, data: res.data };
+    } catch (err) {
+      console.error('VT IP error for', ip, err && err.response ? err.response.status : err.message);
+      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+    }
   }
   async function vtGetDomain(domain) {
-    const res = await client.get(`https://www.virustotal.com/api/v3/domains/${domain}`, { headers: { 'x-apikey': VT_API_KEY } });
-    return res.data;
+    try {
+      const res = await client.get(`https://www.virustotal.com/api/v3/domains/${domain}`, { headers: { 'x-apikey': VT_API_KEY } });
+      console.log('VT Domain response for', domain, 'size:', JSON.stringify(res.data).length);
+      return { ok: true, data: res.data };
+    } catch (err) {
+      console.error('VT Domain error for', domain, err && err.response ? err.response.status : err.message);
+      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+    }
   }
   async function vtGetFile(hash) {
-    const res = await client.get(`https://www.virustotal.com/api/v3/files/${hash}`, { headers: { 'x-apikey': VT_API_KEY } });
-    return res.data;
+    try {
+      const res = await client.get(`https://www.virustotal.com/api/v3/files/${hash}`, { headers: { 'x-apikey': VT_API_KEY } });
+      console.log('VT File response for', hash, 'size:', JSON.stringify(res.data).length);
+      return { ok: true, data: res.data };
+    } catch (err) {
+      console.error('VT File error for', hash, err && err.response ? err.response.status : err.message);
+      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'vt_error') };
+    }
   }
   async function abuseCheckIP(ip) {
-    const res = await client.get('https://api.abuseipdb.com/api/v2/check', {
-      params: { ipAddress: ip, maxAgeInDays: 90 },
-      headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
-    });
-    return res.data.data;
+    try {
+      const res = await client.get('https://api.abuseipdb.com/api/v2/check', {
+        params: { ipAddress: ip, maxAgeInDays: 90 },
+        headers: { Key: ABUSE_API_KEY, Accept: 'application/json' }
+      });
+      console.log('AbuseIPDB response for', ip, 'size:', JSON.stringify(res.data).length);
+      return { ok: true, data: res.data.data };
+    } catch (err) {
+      console.error('AbuseIPDB error for', ip, err && err.response ? err.response.status : err.message);
+      return { ok: false, error: (err.response && err.response.data) ? err.response.data : (err.message || 'abuse_error') };
+    }
   }
 
-  function classifyResult({ vt, abuse }) {
-    let malicious = false;
+  function classifyResult({ vtResult, abuseResult }) {
+    // vtResult and abuseResult follow the { ok: boolean, data: ... } shape
     const reasons = [];
-    if (abuse && Number(abuse.abuseConfidenceScore || 0) >= 10) {
-      malicious = true;
-      reasons.push(`AbuseIPDB score ${abuse.abuseConfidenceScore}`);
-    }
-    if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
-      const s = vt.data.attributes.last_analysis_stats;
-      if (Number(s.malicious || 0) > 0) {
+    let malicious = false;
+    let indeterminate = false;
+
+    if (!abuseResult || abuseResult.ok === false) {
+      // se falhou na consulta, marque indeterminado
+      indeterminate = true;
+      if (abuseResult && abuseResult.error) reasons.push(`AbuseIPDB error: ${JSON.stringify(abuseResult.error).slice(0,120)}`);
+    } else {
+      const abuse = abuseResult.data;
+      if (abuse && Number(abuse.abuseConfidenceScore || 0) >= 10) {
         malicious = true;
-        reasons.push(`VirusTotal: ${s.malicious} detections`);
+        reasons.push(`AbuseIPDB score ${abuse.abuseConfidenceScore}`);
       }
     }
-    return { malicious, reasons };
+
+    if (!vtResult || vtResult.ok === false) {
+      indeterminate = true;
+      if (vtResult && vtResult.error) reasons.push(`VT error: ${JSON.stringify(vtResult.error).slice(0,120)}`);
+    } else {
+      const vt = vtResult.data;
+      if (vt && vt.data && vt.data.attributes && vt.data.attributes.last_analysis_stats) {
+        const s = vt.data.attributes.last_analysis_stats;
+        if (Number(s.malicious || 0) > 0) {
+          malicious = true;
+          reasons.push(`VirusTotal: ${s.malicious} detections`);
+        }
+      }
+    }
+
+    // Prioridade: se malicioso => malicioso; se não malicioso e indeterminado => indeterminado; caso contrário clean
+    if (malicious) return { malicious: true, indeterminate: false, reasons };
+    if (indeterminate) return { malicious: false, indeterminate: true, reasons };
+    return { malicious: false, indeterminate: false, reasons };
   }
 
   app.get('/analyze', async (req, res) => {
@@ -265,9 +311,9 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
       let result = { target, type: 'unknown', vt: null, abuse: null };
       if (isIP(target)) {
         result.type = 'ip';
-        const [a, v] = await Promise.allSettled([abuseCheckIP(target), vtGetIP(target)]);
-        if (a.status === 'fulfilled') result.abuse = a.value;
-        if (v.status === 'fulfilled') result.vt = v.value;
+        const [a, v] = await Promise.all([abuseCheckIP(target), vtGetIP(target)]);
+        result.abuse = a;
+        result.vt = v;
       } else if (isHash(target)) {
         result.type = 'hash';
         result.vt = await vtGetFile(target);
@@ -275,9 +321,10 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
         result.type = 'domain';
         result.vt = await vtGetDomain(target);
       }
-      result.classification = classifyResult({ vt: result.vt, abuse: result.abuse });
+      result.classification = classifyResult({ vtResult: result.vt, abuseResult: result.abuse });
       res.json(result);
     } catch (err) {
+      console.error('Analyze route error:', err);
       res.status(500).json({ error: err.message || 'vmint_error' });
     }
   });
@@ -287,18 +334,29 @@ app.get('/api/dehashed/search', verifyFirebaseToken, async (req, res) => {
     const results = [];
     for (const t of targets) {
       try {
-        let entry = { target: t, classification: { malicious: false } };
+        let entry = { target: t, classification: { malicious: false, indeterminate: false }, raw: null };
         if (isIP(t)) {
-          const [a, v] = await Promise.allSettled([abuseCheckIP(t), vtGetIP(t)]);
-          entry.classification = classifyResult({ vt: v.value, abuse: a.value });
+          const [a, v] = await Promise.all([abuseCheckIP(t), vtGetIP(t)]);
+          entry.raw = { abuse: a, vt: v };
+          entry.classification = classifyResult({ vtResult: v, abuseResult: a });
+        } else {
+          // opcional: tratar domains/hashes em batch se quiser
+          entry.note = 'Tipo nao-IP - pulado';
         }
         results.push(entry);
         await new Promise(r => setTimeout(r, 400));
       } catch (e) {
-        results.push({ target: t, error: e.message });
+        console.error('Batch item error for', t, e);
+        results.push({ target: t, error: e.message || String(e) });
       }
     }
-    res.json({ malicious: results.filter(r => r.classification?.malicious), clean: results.filter(r => !r.classification?.malicious), all: results });
+    // Retorne também counts e detalhes de erros
+    res.json({
+      malicious: results.filter(r => r.classification && r.classification.malicious),
+      indeterminate: results.filter(r => r.classification && r.classification.indeterminate),
+      clean: results.filter(r => r.classification && !r.classification.malicious && !r.classification.indeterminate),
+      all: results
+    });
   });
 
   global.VMIntelligence.routesAdded = true;
